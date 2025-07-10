@@ -1,6 +1,8 @@
 import axios from 'axios';
-
-const BASE_URL = 'http://localhost:5000'; // Adjust to your Python API URL
+import dotenv from 'dotenv';
+dotenv.config();
+// const BASE_URL = 'http://mt5.aurify.ae:5000'; // Adjust to your Python API URL
+const BASE_URL = 'http://127.0.0.1:5000'; // Adjust to your Python API URL
 
 class MT5Service {
   constructor() {

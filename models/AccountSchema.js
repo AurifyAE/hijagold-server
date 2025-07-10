@@ -1,4 +1,4 @@
-import mongoose from 'mongoose';
+import mongoose from "mongoose";
 
 const AccountSchema = new mongoose.Schema(
   {
@@ -18,6 +18,10 @@ const AccountSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    reservedAmount: {
+      type: Number,
+      required: true,
+    },
     METAL_WT: {
       type: Number,
       required: true,
@@ -29,6 +33,10 @@ const AccountSchema = new mongoose.Schema(
     Account_Type: {
       type: String,
       required: true,
+    },
+    isFreeze: {
+      type: Boolean,
+      default: false,
     },
     is_favorite: {
       type: Boolean,
@@ -58,8 +66,12 @@ const AccountSchema = new mongoose.Schema(
     },
     phoneNumber: {
       type: String,
-      required: true,
-      match: [/^\+\d{10,15}$/, 'Phone number must be in E.164 format (e.g., +918138823410)'],
+      default: null,
+      // required: true,
+      match: [
+        /^\+\d{10,15}$/,
+        "Phone number must be in E.164 format (e.g., +918138823410)",
+      ],
       unique: true,
     },
     address: {
@@ -91,6 +103,7 @@ const AccountSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    lastUpdated: { type: Date, default: null },
   },
   { timestamps: true }
 );

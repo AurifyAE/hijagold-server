@@ -35,7 +35,7 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
       throw new Error('User account not found');
     }
 
-    const currentCashBalance = parseFloat(userAccount.AMOUNTFC);
+    const currentCashBalance = parseFloat(userAccount.reservedAmount);
     const currentMetalBalance = parseFloat(userAccount.METAL_WT);
     const currentPrice = parseFloat(tradeData.price);
     const volume = parseFloat(tradeData.volume);
@@ -123,7 +123,7 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
     await Account.findByIdAndUpdate(
       userId,
       {
-        AMOUNTFC: newCashBalance.toFixed(2),
+        reservedAmount: newCashBalance.toFixed(2),
         METAL_WT: newMetalBalance.toFixed(2),
       },
       { session: mongoSession, new: true }
@@ -440,7 +440,7 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
       clientProfit = (entryPrice - clientClosingPrice) * volume;
     }
 
-    let newCashBalance = parseFloat(userAccount.AMOUNTFC);
+    let newCashBalance = parseFloat(userAccount.reservedAmount);
     let newMetalBalance = parseFloat(userAccount.METAL_WT);
     const currentCashBalance = newCashBalance;
     const currentMetalBalance = newMetalBalance;
@@ -516,7 +516,7 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
       await Account.findByIdAndUpdate(
         order.user,
         {
-          AMOUNTFC: newCashBalance.toFixed(2),
+          reservedAmount: newCashBalance.toFixed(2),
           METAL_WT: newMetalBalance.toFixed(2),
         },
         { session: mongoSession, new: true }
@@ -659,7 +659,7 @@ export const getTradesByUser = async (adminId, userId) => {
     })
       .populate(
         'user',
-        'firstName lastName ACCOUNT_HEAD email phoneNumber userSpread accountStatus'
+        '_id firstName lastName ACCOUNT_HEAD email phoneNumber userSpread accountStatus'
       )
       .sort({ createdAt: -1 });
 
