@@ -378,6 +378,7 @@ export const updateUserById = async (adminId, userId, updateData) => {
       "kycStatus",
       "bidSpread",
       "askSpread",
+      "isFreeze"
     ];
 
     const sanitizedData = {};
