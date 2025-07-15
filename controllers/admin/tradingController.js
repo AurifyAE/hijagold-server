@@ -147,7 +147,8 @@ export const updateTrade = async (req, res, next) => {
   let phoneNumber;
   try {
     const { adminId, orderId } = req.params;
-    const { orderStatus } = req.body;
+    const { orderStatus,profit,closingPrice } = req.body;
+    
 
     // Validate input
     if (!mongoose.Types.ObjectId.isValid(orderId)) {
@@ -185,8 +186,10 @@ export const updateTrade = async (req, res, next) => {
       volume: order.volume,
       type: order.type === 'BUY' ? 'SELL' : 'BUY', // Opposite type for closing
       openingPrice: order.openingPrice,
+      profit: profit|| 0,
+      closingPrice:closingPrice
     };
-
+console.log(updateData)
     // Update trade status (includes MT5 closure)
     const updatedTrade = await tradingServices.updateTradeStatus(adminId, orderId, updateData);
 
@@ -254,6 +257,20 @@ export const getUserTrades = async (req, res, next) => {
   }
 };
 
+export const getLPProfitOrdersByAdmin = async (req, res, next) => {
+  try {
+    const LPProfitInfo = await tradingServices.getLPProfitOrders();
+    
+    res.json({
+      status: 200,
+      success: true,
+      message: 'fetch LPProfit successfully',
+      data: LPProfitInfo,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 export const getUserOrdersByAdmin = async (req, res, next) => {
   try {
     const { adminId, userId } = req.params;

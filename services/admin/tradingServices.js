@@ -1,9 +1,10 @@
-import mongoose from 'mongoose';
-import LPPosition from '../../models/LPPositionSchema.js';
-import Order from '../../models/OrderSchema.js';
-import Ledger from '../../models/LedgerSchema.js';
-import Account from '../../models/AccountSchema.js';
-import mt5Service from '../../services/Trading/mt5Service.js';
+import mongoose from "mongoose";
+import LPPosition from "../../models/LPPositionSchema.js";
+import Order from "../../models/OrderSchema.js";
+import Ledger from "../../models/LedgerSchema.js";
+import Account from "../../models/AccountSchema.js";
+import mt5Service from "../../services/Trading/mt5Service.js";
+import LPProfit from "../../models/LPProfit.js";
 
 const TROY_OUNCE_GRAMS = 31.103;
 const GOLD_CONVERSION_FACTOR = 3.674;
@@ -11,7 +12,7 @@ const TTB_FACTOR = 116.64;
 
 // Symbol mapping for CRM to MT5
 const SYMBOL_MAPPING = {
-  GOLD: 'XAUUSD_TTBAR.Fix',
+  GOLD: "XAUUSD_TTBAR.Fix",
 };
 
 // Generate unique entry ID for ledger
@@ -21,8 +22,13 @@ const generateEntryId = (prefix) => {
   return `${prefix}-${timestamp.substring(timestamp.length - 5)}-${randomStr}`;
 };
 
-export const createTrade = async (adminId, userId, tradeData, session = null) => {
-  const mongoSession = session || await mongoose.startSession();
+export const createTrade = async (
+  adminId,
+  userId,
+  tradeData,
+  session = null
+) => {
+  const mongoSession = session || (await mongoose.startSession());
   let committed = false;
   let sessionEnded = false;
 
@@ -32,7 +38,7 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
     // Validate user account
     const userAccount = await Account.findById(userId).session(mongoSession);
     if (!userAccount) {
-      throw new Error('User account not found');
+      throw new Error("User account not found");
     }
 
     const currentCashBalance = parseFloat(userAccount.reservedAmount);
@@ -43,22 +49,17 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
     // Check sufficient balances
     const requiredMargin = parseFloat(tradeData.requiredMargin || 0);
     if (currentCashBalance < requiredMargin) {
-      throw new Error('Insufficient cash balance');
+      throw new Error("Insufficient cash balance");
     }
-    if (tradeData.type === 'SELL' && currentMetalBalance < volume) {
-      throw new Error('Insufficient gold balance for SELL order');
+    if (tradeData.type === "SELL" && currentMetalBalance < volume) {
+      throw new Error("Insufficient gold balance for SELL order");
     }
 
     // Calculate client order price with spread
-    let clientOrderPrice;
-    if (tradeData.type === 'BUY') {
-      clientOrderPrice = currentPrice + (userAccount.askSpread || 0);
-    } else {
-      clientOrderPrice = currentPrice - (userAccount.bidSpread || 0);
-    }
+    let clientOrderPrice = currentPrice;
 
     const goldWeightValue =
-      (clientOrderPrice / TROY_OUNCE_GRAMS) *
+      (currentPrice / TROY_OUNCE_GRAMS) *
       GOLD_CONVERSION_FACTOR *
       TTB_FACTOR *
       volume;
@@ -68,6 +69,26 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
       GOLD_CONVERSION_FACTOR *
       TTB_FACTOR *
       volume;
+
+    // Calculate LP Profit
+    const gramValue = TTB_FACTOR / TROY_OUNCE_GRAMS;
+    let lpProfitValue;
+
+    if (tradeData.type === "BUY") {
+      // For BUY orders, LP profit is calculated using askSpread
+      lpProfitValue =
+        gramValue *
+        volume *
+        (userAccount.askSpread || 0) *
+        GOLD_CONVERSION_FACTOR;
+    } else {
+      // For SELL orders, LP profit is calculated using bidSpread
+      lpProfitValue =
+        gramValue *
+        volume *
+        (userAccount.bidSpread || 0) *
+        GOLD_CONVERSION_FACTOR;
+    }
 
     // Create order
     const newOrder = new Order({
@@ -81,7 +102,7 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
       profit: 0,
       user: userId,
       adminId: adminId,
-      orderStatus: 'PROCESSING',
+      orderStatus: "PROCESSING",
       openingDate: tradeData.openingDate,
       storedTime: new Date(),
       comment: tradeData.comment,
@@ -102,9 +123,21 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
       openDate: tradeData.openingDate,
       currentPrice: currentPrice,
       clientOrders: savedOrder._id,
-      status: 'OPEN',
+      status: "OPEN",
     });
     const savedLPPosition = await lpPosition.save({ session: mongoSession });
+
+    // Create LP Profit entry
+    const lpProfit = new LPProfit({
+      orderNo: tradeData.orderNo,
+      orderType: tradeData.type,
+      status: "OPEN",
+      volume: tradeData.volume,
+      value: lpProfitValue.toFixed(2),
+      user: userId,
+      datetime: new Date(tradeData.openingDate),
+    });
+    const savedLPProfit = await lpProfit.save({ session: mongoSession });
 
     // Update order with lpPositionId
     savedOrder.lpPositionId = savedLPPosition._id;
@@ -114,9 +147,9 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
     let newCashBalance = currentCashBalance - requiredMargin;
     let newMetalBalance = currentMetalBalance;
 
-    if (tradeData.type === 'BUY') {
+    if (tradeData.type === "BUY") {
       newMetalBalance = currentMetalBalance + tradeData.volume;
-    } else if (tradeData.type === 'SELL') {
+    } else if (tradeData.type === "SELL") {
       newMetalBalance = currentMetalBalance - tradeData.volume;
     }
 
@@ -131,12 +164,14 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
 
     // Create ledger entries
     const orderLedgerEntry = new Ledger({
-      entryId: generateEntryId('ORD'),
-      entryType: 'ORDER',
+      entryId: generateEntryId("ORD"),
+      entryType: "ORDER",
       referenceNumber: tradeData.orderNo,
-      description: `Margin for ${tradeData.type} ${tradeData.volume} ${tradeData.symbol} @ ${clientOrderPrice.toFixed(2)} (AED ${goldWeightValue.toFixed(2)})`,
+      description: `Margin for ${tradeData.type} ${tradeData.volume} ${
+        tradeData.symbol
+      } @ ${clientOrderPrice.toFixed(2)} (AED ${goldWeightValue.toFixed(2)})`,
       amount: requiredMargin.toFixed(2),
-      entryNature: 'DEBIT',
+      entryNature: "DEBIT",
       runningBalance: newCashBalance.toFixed(2),
       orderDetails: {
         type: tradeData.type,
@@ -144,7 +179,7 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
         volume: tradeData.volume,
         entryPrice: clientOrderPrice,
         profit: 0,
-        status: 'PROCESSING',
+        status: "PROCESSING",
       },
       user: userId,
       adminId: adminId,
@@ -153,12 +188,16 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
     await orderLedgerEntry.save({ session: mongoSession });
 
     const lpLedgerEntry = new Ledger({
-      entryId: generateEntryId('LP'),
-      entryType: 'LP_POSITION',
+      entryId: generateEntryId("LP"),
+      entryType: "LP_POSITION",
       referenceNumber: tradeData.orderNo,
-      description: `LP Position opened for ${tradeData.type} ${tradeData.volume} ${tradeData.symbol} @ ${currentPrice.toFixed(2)} (AED ${lpCurrentPrice.toFixed(2)})`,
+      description: `LP Position opened for ${tradeData.type} ${
+        tradeData.volume
+      } ${tradeData.symbol} @ ${currentPrice.toFixed(
+        2
+      )} (AED ${lpCurrentPrice.toFixed(2)})`,
       amount: lpCurrentPrice.toFixed(2),
-      entryNature: 'CREDIT',
+      entryNature: "CREDIT",
       runningBalance: newCashBalance.toFixed(2),
       lpDetails: {
         positionId: tradeData.orderNo,
@@ -167,7 +206,7 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
         volume: tradeData.volume,
         entryPrice: currentPrice,
         profit: 0,
-        status: 'OPEN',
+        status: "OPEN",
       },
       user: userId,
       adminId: adminId,
@@ -176,16 +215,16 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
     await lpLedgerEntry.save({ session: mongoSession });
 
     const cashTransactionLedgerEntry = new Ledger({
-      entryId: generateEntryId('TRX'),
-      entryType: 'TRANSACTION',
+      entryId: generateEntryId("TRX"),
+      entryType: "TRANSACTION",
       referenceNumber: tradeData.orderNo,
       description: `Margin allocation for trade ${tradeData.orderNo}`,
       amount: requiredMargin.toFixed(2),
-      entryNature: 'DEBIT',
+      entryNature: "DEBIT",
       runningBalance: newCashBalance.toFixed(2),
       transactionDetails: {
         type: null,
-        asset: 'CASH',
+        asset: "CASH",
         previousBalance: currentCashBalance,
       },
       user: userId,
@@ -196,29 +235,37 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
     await cashTransactionLedgerEntry.save({ session: mongoSession });
 
     const goldTransactionLedgerEntry = new Ledger({
-      entryId: generateEntryId('TRX'),
-      entryType: 'TRANSACTION',
+      entryId: generateEntryId("TRX"),
+      entryType: "TRANSACTION",
       referenceNumber: tradeData.orderNo,
-      description: `Gold ${tradeData.type === 'BUY' ? 'credit' : 'debit'} for trade ${tradeData.orderNo}`,
+      description: `Gold ${
+        tradeData.type === "BUY" ? "credit" : "debit"
+      } for trade ${tradeData.orderNo}`,
       amount: tradeData.volume,
-      entryNature: tradeData.type === 'BUY' ? 'CREDIT' : 'DEBIT',
+      entryNature: tradeData.type === "BUY" ? "CREDIT" : "DEBIT",
       runningBalance: newMetalBalance.toFixed(2),
       transactionDetails: {
         type: null,
-        asset: 'GOLD',
+        asset: "GOLD",
         previousBalance: currentMetalBalance,
       },
       user: userId,
       adminId: adminId,
       date: new Date(tradeData.openingDate),
-      notes: `Gold weight (${tradeData.volume}) ${tradeData.type === 'BUY' ? 'added to' : 'subtracted from'} account for ${tradeData.type} order (Value: AED ${requiredMargin.toFixed(2)})`,
+      notes: `Gold weight (${tradeData.volume}) ${
+        tradeData.type === "BUY" ? "added to" : "subtracted from"
+      } account for ${
+        tradeData.type
+      } order (Value: AED ${requiredMargin.toFixed(2)})`,
     });
     await goldTransactionLedgerEntry.save({ session: mongoSession });
 
     // Validate and place MT5 trade
     const mt5Symbol = SYMBOL_MAPPING[tradeData.symbol];
     if (!mt5Symbol) {
-      throw new Error(`Invalid symbol: ${tradeData.symbol}. No MT5 mapping found.`);
+      throw new Error(
+        `Invalid symbol: ${tradeData.symbol}. No MT5 mapping found.`
+      );
     }
 
     const validatedSymbol = await mt5Service.validateSymbol(mt5Symbol);
@@ -239,7 +286,9 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
       comment: tradeData.comment,
       magic: 123456,
     };
-    console.log(`MT5 Trade Parameters: ${JSON.stringify(mt5TradeData, null, 2)}`);
+    console.log(
+      `MT5 Trade Parameters: ${JSON.stringify(mt5TradeData, null, 2)}`
+    );
 
     const mt5Result = await mt5Service.placeTrade(mt5TradeData);
     console.log(`MT5 trade placed successfully: Order ID ${mt5Result.ticket}`);
@@ -248,10 +297,15 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
       await updateTradeStatus(
         adminId,
         savedOrder._id.toString(),
-        { orderStatus: 'FAILED', notificationError: mt5Result.error || 'Unknown MT5 error' },
+        {
+          orderStatus: "FAILED",
+          notificationError: mt5Result.error || "Unknown MT5 error",
+        },
         mongoSession
       );
-      throw new Error(`MT5 trade failed: ${mt5Result.error || 'Unknown error'}`);
+      throw new Error(
+        `MT5 trade failed: ${mt5Result.error || "Unknown error"}`
+      );
     }
 
     // Update CRM trade with MT5 details
@@ -259,7 +313,7 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
       adminId,
       savedOrder._id.toString(),
       {
-        orderStatus: 'OPEN',
+        orderStatus: "OPEN",
         ticket: mt5Result.ticket.toString(),
         openingPrice: mt5Result.price,
         volume: mt5Result.volume,
@@ -278,6 +332,7 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
     return {
       clientOrder: savedOrder,
       lpPosition: savedLPPosition,
+      lpProfit: savedLPProfit,
       mt5Trade: {
         ticket: mt5Result.ticket,
         volume: mt5Result.volume,
@@ -291,6 +346,7 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
       },
       requiredMargin,
       goldWeightValue,
+      lpProfitValue,
       convertedPrice: {
         client: (goldWeightValue / volume).toFixed(2),
         lp: (lpCurrentPrice / volume).toFixed(2),
@@ -310,7 +366,9 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
         console.error(`Failed to abort transaction: ${abortError.message}`);
       }
     }
-    console.error(`Trade creation error: ${error.message}, Stack: ${error.stack}`);
+    console.error(
+      `Trade creation error: ${error.message}, Stack: ${error.stack}`
+    );
     throw new Error(`Error creating trade: ${error.message}`);
   } finally {
     if (!session && !sessionEnded) {
@@ -323,25 +381,32 @@ export const createTrade = async (adminId, userId, tradeData, session = null) =>
   }
 };
 
-export const updateTradeStatus = async (adminId, orderId, updateData, session = null) => {
-  const mongoSession = session || await mongoose.startSession();
+export const updateTradeStatus = async (
+  adminId,
+  orderId,
+  updateData,
+  session = null
+) => {
+  const mongoSession = session || (await mongoose.startSession());
   let committed = false;
   let sessionEnded = false;
+  console.log(updateData);
 
   try {
     if (!session) mongoSession.startTransaction();
 
     const allowedUpdates = [
-      'orderStatus',
-      'closingPrice',
-      'closingDate',
-      'profit',
-      'comment',
-      'price',
-      'ticket',
-      'volume',
-      'symbol',
-      'notificationError',
+      "orderStatus",
+      "closingPrice",
+      "closingDate",
+      "profit",
+      "comment",
+      "price",
+      "ticket",
+      "volume",
+      "symbol",
+      "notificationError",
+      "AMOUNTFC",
     ];
     const sanitizedData = {};
     Object.keys(updateData).forEach((key) => {
@@ -350,72 +415,105 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
       }
     });
 
-    if (sanitizedData.orderStatus === 'CLOSED' && !sanitizedData.closingDate) {
+    if (sanitizedData.orderStatus === "CLOSED" && !sanitizedData.closingDate) {
       sanitizedData.closingDate = new Date();
     }
     if (sanitizedData.closingPrice) {
       sanitizedData.price = sanitizedData.closingPrice;
     }
 
-    console.log(`Updating trade with orderId: ${orderId}, adminId: ${adminId}, updateData: ${JSON.stringify(sanitizedData)}`);
-    const order = await Order.findOne({ _id: orderId, adminId }).session(mongoSession);
+    console.log(
+      `Updating trade with orderId: ${orderId}, adminId: ${adminId}, updateData: ${JSON.stringify(
+        sanitizedData
+      )}`
+    );
+    const order = await Order.findOne({ _id: orderId, adminId }).session(
+      mongoSession
+    );
     if (!order) {
-      console.error(`Order not found for orderId: ${orderId}, adminId: ${adminId}`);
-      throw new Error('Order not found or unauthorized');
+      console.error(
+        `Order not found for orderId: ${orderId}, adminId: ${adminId}`
+      );
+      throw new Error("Order not found or unauthorized");
     }
 
-    const userAccount = await Account.findById(order.user).session(mongoSession);
+    const userAccount = await Account.findById(order.user).session(
+      mongoSession
+    );
     if (!userAccount) {
       console.error(`User account not found for userId: ${order.user}`);
-      throw new Error('User account not found');
+      throw new Error("User account not found");
     }
 
-    if (sanitizedData.orderStatus === 'CLOSED' && order.orderStatus !== 'CLOSED') {
+    if (
+      sanitizedData.orderStatus === "CLOSED" &&
+      order.orderStatus !== "CLOSED"
+    ) {
       try {
         console.log(`Fetching MT5 positions for ticket ${order.ticket}`);
         const mt5CloseData = {
           ticket: order.ticket,
           symbol: SYMBOL_MAPPING[order.symbol] || order.symbol,
           volume: parseFloat(order.volume),
-          type: order.type === 'BUY' ? 'SELL' : 'BUY', // Opposite type for closing
+          type: order.type === "BUY" ? "SELL" : "BUY", // Opposite type for closing
           openingPrice: parseFloat(order.openingPrice),
         };
-        console.log(`MT5 close trade request: ${JSON.stringify(mt5CloseData, null, 2)}`);
+        console.log(
+          `MT5 close trade request: ${JSON.stringify(mt5CloseData, null, 2)}`
+        );
 
         const mt5CloseResult = await mt5Service.closeTrade(mt5CloseData);
-        console.log(`MT5 close trade result: ${JSON.stringify(mt5CloseResult, null, 2)}`);
+        console.log(
+          `MT5 close trade result: ${JSON.stringify(mt5CloseResult, null, 2)}`
+        );
 
         if (!mt5CloseResult.success) {
-          if (mt5CloseResult.error.includes('Position not found') || mt5CloseResult.likelyClosed) {
-            console.warn(`Position ${order.ticket} not found in MT5. Assuming already closed.`);
-            const priceData = await mt5Service.getPrice(SYMBOL_MAPPING[order.symbol] || order.symbol);
-            sanitizedData.closingPrice = order.type === 'BUY' ? priceData.bid : priceData.ask;
-            sanitizedData.profit =
-              order.type === 'BUY'
-                ? (sanitizedData.closingPrice - order.openingPrice) * order.volume
-                : (order.openingPrice - sanitizedData.closingPrice) * order.volume;
+          if (
+            mt5CloseResult.error.includes("Position not found") ||
+            mt5CloseResult.likelyClosed
+          ) {
+            console.warn(
+              `Position ${order.ticket} not found in MT5. Assuming already closed.`
+            );
+            const priceData = await mt5Service.getPrice(
+              SYMBOL_MAPPING[order.symbol] || order.symbol
+            );
+            // sanitizedData.closingPrice =
+            //   order.type === "BUY" ? priceData.bid : priceData.ask;
+            // Note: We'll calculate profit using CRM logic below, not MT5 profit
           } else {
-            throw new Error(`MT5 trade closure failed: ${mt5CloseResult.error || 'Unknown error'}`);
+            throw new Error(
+              `MT5 trade closure failed: ${
+                mt5CloseResult.error || "Unknown error"
+              }`
+            );
           }
         } else {
-          sanitizedData.closingPrice = mt5CloseResult.closePrice || mt5CloseResult.data.price;
-          sanitizedData.profit = mt5CloseResult.profit !== undefined ? mt5CloseResult.profit : mt5CloseResult.data.profit;
+          // Use MT5 closing price but we'll calculate profit using CRM logic
+          // sanitizedData.closingPrice =
+          //   mt5CloseResult.closePrice || mt5CloseResult.data.price;
+          // Note: Ignoring mt5CloseResult.profit - we'll calculate our own profit
         }
       } catch (mt5Error) {
-        console.error(`Failed to close MT5 trade for ticket ${order.ticket}: ${mt5Error.message}, Stack: ${mt5Error.stack}`);
+        console.error(
+          `Failed to close MT5 trade for ticket ${order.ticket}: ${mt5Error.message}, Stack: ${mt5Error.stack}`
+        );
         throw new Error(`Failed to close MT5 trade: ${mt5Error.message}`);
       }
     }
 
-    const currentPrice = parseFloat(sanitizedData.closingPrice || order.price);
-    let clientClosingPrice;
-    if (order.type === 'BUY') {
-      clientClosingPrice = currentPrice - (userAccount.bidSpread || 0);
-    } else {
-      clientClosingPrice = currentPrice + (userAccount.askSpread || 0);
-    }
+    const currentPrice = parseFloat(sanitizedData.closingPrice);
+    console.log(currentPrice);
+    let clientClosingPrice = currentPrice;
+    // if (order.type === "BUY") {
+    //   clientClosingPrice = currentPrice - (userAccount.bidSpread || 0);
+    //   console.log("first clientClosingPrice")
+    //   console.log(clientClosingPrice)
+    // } else {
+    //   clientClosingPrice = currentPrice + (userAccount.askSpread || 0);
+    // }
 
-    if (sanitizedData.orderStatus === 'CLOSED') {
+    if (sanitizedData.orderStatus === "CLOSED") {
       sanitizedData.closingPrice = clientClosingPrice.toFixed(2);
     }
 
@@ -432,31 +530,44 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
       GOLD_CONVERSION_FACTOR *
       TTB_FACTOR *
       volume;
+    console.log("______________-");
+    console.log(entryGoldWeightValue);
+    console.log(closingGoldWeightValue);
+    console.log("______________-");
 
+    // Always calculate profit using CRM logic, not MT5 profit
     let clientProfit;
-    if (order.type === 'BUY') {
-      clientProfit = (clientClosingPrice - entryPrice) * volume;
+    if (order.type === "BUY") {
+      clientProfit = closingGoldWeightValue - entryGoldWeightValue;
     } else {
-      clientProfit = (entryPrice - clientClosingPrice) * volume;
+      clientProfit = entryGoldWeightValue - closingGoldWeightValue;
     }
+    console.log("+++++++++++++++");
+    console.log(clientProfit);
+    console.log("+++++++++++++++");
 
     let newCashBalance = parseFloat(userAccount.reservedAmount);
     let newMetalBalance = parseFloat(userAccount.METAL_WT);
+    let newAMOUNTFC = parseFloat(userAccount.AMOUNTFC || 0);
     const currentCashBalance = newCashBalance;
     const currentMetalBalance = newMetalBalance;
+    const currentAMOUNTFC = newAMOUNTFC;
 
     Object.keys(sanitizedData).forEach((key) => {
       order[key] = sanitizedData[key];
     });
 
-    if (sanitizedData.orderStatus === 'CLOSED') {
+    if (sanitizedData.orderStatus === "CLOSED") {
+      // Always use CRM calculated profit, not MT5 profit
       order.profit = clientProfit.toFixed(2);
     }
 
     await order.save({ session: mongoSession });
 
     let lpProfit = 0;
-    const lpPosition = await LPPosition.findOne({ positionId: order.orderNo }).session(mongoSession);
+    const lpPosition = await LPPosition.findOne({
+      positionId: order.orderNo,
+    }).session(mongoSession);
     if (lpPosition) {
       if (sanitizedData.closingPrice) {
         lpPosition.closingPrice = currentPrice;
@@ -465,8 +576,8 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
       if (sanitizedData.closingDate) {
         lpPosition.closeDate = sanitizedData.closingDate;
       }
-      if (sanitizedData.orderStatus === 'CLOSED') {
-        lpPosition.status = 'CLOSED';
+      if (sanitizedData.orderStatus === "CLOSED") {
+        lpPosition.status = "CLOSED";
 
         const lpEntryPrice = parseFloat(lpPosition.entryPrice);
         const lpEntryGoldWeightValue =
@@ -480,8 +591,12 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
           TTB_FACTOR *
           volume;
 
-        const openingDifference = Math.abs(lpEntryGoldWeightValue - entryGoldWeightValue);
-        const closingDifference = Math.abs(lpClosingGoldWeightValue - closingGoldWeightValue);
+        const openingDifference = Math.abs(
+          lpEntryGoldWeightValue - entryGoldWeightValue
+        );
+        const closingDifference = Math.abs(
+          lpClosingGoldWeightValue - closingGoldWeightValue
+        );
         lpProfit = openingDifference + closingDifference;
 
         lpPosition.profit = lpProfit.toFixed(2);
@@ -496,39 +611,101 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
       console.warn(`LPPosition not found for positionId: ${order.orderNo}`);
     }
 
-    if (sanitizedData.orderStatus === 'CLOSED') {
+    // Update LP Profit when order is closed
+    if (sanitizedData.orderStatus === "CLOSED") {
+      const lpProfitRecord = await LPProfit.findOne({
+        orderNo: order.orderNo,
+      }).session(mongoSession);
+      if (lpProfitRecord) {
+        // Calculate closing LP profit based on the closing spread
+        const gramValue = TTB_FACTOR / TROY_OUNCE_GRAMS;
+        let closingLPProfitValue;
+
+        // When closing, the order type is opposite to the original
+        // If original order was BUY, closing acts as SELL (use bidSpread)
+        // If original order was SELL, closing acts as BUY (use askSpread)
+        if (order.type === "BUY") {
+          // Original BUY order, closing as SELL, use bidSpread
+          closingLPProfitValue =
+            gramValue *
+            volume *
+            (userAccount.bidSpread || 0) *
+            GOLD_CONVERSION_FACTOR;
+        } else {
+          // Original SELL order, closing as BUY, use askSpread
+          closingLPProfitValue =
+            gramValue *
+            volume *
+            (userAccount.askSpread || 0) *
+            GOLD_CONVERSION_FACTOR;
+        }
+
+        // // Update LP Profit record
+        // const totalLPProfit =
+        //   parseFloat(lpProfitRecord.value) + closingLPProfitValue;
+        // lpProfitRecord.status = "CLOSED";
+        // lpProfitRecord.value = totalLPProfit.toFixed(2);
+
+        await lpProfitRecord.save({ session: mongoSession });
+        // Create LP Profit entry
+        const lpProfit = new LPProfit({
+          orderNo: order.orderNo,
+          orderType: order.type === "BUY" ? "SELL" : "BUY", // Opposite type for closing
+          status: "CLOSED",
+          volume: volume,
+          value: closingLPProfitValue.toFixed(2),
+          user: order.user,
+          datetime: new Date(sanitizedData.closingDate),
+        });
+        await lpProfit.save({ session: mongoSession });
+      } else {
+        console.warn(
+          `LP Profit record not found for orderNo: ${order.orderNo}`
+        );
+      }
+    }
+
+    if (sanitizedData.orderStatus === "CLOSED") {
       const settlementAmount = order.requiredMargin
         ? parseFloat(order.requiredMargin)
-        : order.type === 'BUY'
+        : order.type === "BUY"
         ? closingGoldWeightValue
         : entryGoldWeightValue;
 
       const userProfit = clientProfit > 0 ? clientProfit : 0;
 
-      if (order.type === 'BUY') {
+      if (order.type === "BUY") {
         newCashBalance = currentCashBalance + settlementAmount + userProfit;
         newMetalBalance = currentMetalBalance - volume;
-      } else if (order.type === 'SELL') {
+      } else if (order.type === "SELL") {
         newCashBalance = currentCashBalance + settlementAmount + userProfit;
         newMetalBalance = currentMetalBalance + volume;
       }
+
+      // Update AMOUNTFC with only the profit amount (can be negative)
+      newAMOUNTFC = currentAMOUNTFC + clientProfit;
 
       await Account.findByIdAndUpdate(
         order.user,
         {
           reservedAmount: newCashBalance.toFixed(2),
           METAL_WT: newMetalBalance.toFixed(2),
+          AMOUNTFC: newAMOUNTFC.toFixed(2),
         },
         { session: mongoSession, new: true }
       );
 
       const orderLedgerEntry = new Ledger({
-        entryId: generateEntryId('ORD'),
-        entryType: 'ORDER',
+        entryId: generateEntryId("ORD"),
+        entryType: "ORDER",
         referenceNumber: order.orderNo,
-        description: `Closing ${order.type} ${volume} ${order.symbol} @ ${clientClosingPrice.toFixed(2)}${userProfit > 0 ? ' with profit' : ''}`,
+        description: `Closing ${order.type} ${volume} ${
+          order.symbol
+        } @ ${clientClosingPrice.toFixed(2)}${
+          userProfit > 0 ? " with profit" : ""
+        }`,
         amount: (settlementAmount + userProfit).toFixed(2),
-        entryNature: 'CREDIT',
+        entryNature: "CREDIT",
         runningBalance: newCashBalance.toFixed(2),
         orderDetails: {
           type: order.type,
@@ -536,8 +713,8 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
           volume: volume,
           entryPrice: entryPrice,
           closingPrice: clientClosingPrice.toFixed(2),
-          profit: clientProfit.toFixed(2),
-          status: 'CLOSED',
+          profit: clientProfit.toFixed(2), // Using CRM calculated profit
+          status: "CLOSED",
         },
         user: order.user,
         adminId: adminId,
@@ -547,12 +724,14 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
 
       if (lpPosition) {
         const lpLedgerEntry = new Ledger({
-          entryId: generateEntryId('LP'),
-          entryType: 'LP_POSITION',
+          entryId: generateEntryId("LP"),
+          entryType: "LP_POSITION",
           referenceNumber: order.orderNo,
-          description: `LP Position closed for ${order.type} ${volume} ${order.symbol} @ ${currentPrice.toFixed(2)}`,
+          description: `LP Position closed for ${order.type} ${volume} ${
+            order.symbol
+          } @ ${currentPrice.toFixed(2)}`,
           amount: settlementAmount.toFixed(2),
-          entryNature: 'DEBIT',
+          entryNature: "DEBIT",
           runningBalance: newCashBalance.toFixed(2),
           lpDetails: {
             positionId: order.orderNo,
@@ -562,7 +741,7 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
             entryPrice: parseFloat(lpPosition.entryPrice),
             closingPrice: currentPrice,
             profit: lpProfit.toFixed(2),
-            status: 'CLOSED',
+            status: "CLOSED",
           },
           user: order.user,
           adminId: adminId,
@@ -572,16 +751,16 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
       }
 
       const cashTransactionLedgerEntry = new Ledger({
-        entryId: generateEntryId('TRX'),
-        entryType: 'TRANSACTION',
+        entryId: generateEntryId("TRX"),
+        entryType: "TRANSACTION",
         referenceNumber: order.orderNo,
         description: `Cash settlement for closing trade ${order.orderNo}`,
         amount: settlementAmount.toFixed(2),
-        entryNature: 'CREDIT',
+        entryNature: "CREDIT",
         runningBalance: newCashBalance.toFixed(2),
         transactionDetails: {
           type: null,
-          asset: 'CASH',
+          asset: "CASH",
           previousBalance: currentCashBalance,
         },
         user: order.user,
@@ -592,24 +771,53 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
       await cashTransactionLedgerEntry.save({ session: mongoSession });
 
       const goldTransactionLedgerEntry = new Ledger({
-        entryId: generateEntryId('TRX'),
-        entryType: 'TRANSACTION',
+        entryId: generateEntryId("TRX"),
+        entryType: "TRANSACTION",
         referenceNumber: order.orderNo,
-        description: `Gold ${order.type === 'BUY' ? 'debit' : 'credit'} for closing trade ${order.orderNo}`,
+        description: `Gold ${
+          order.type === "BUY" ? "debit" : "credit"
+        } for closing trade ${order.orderNo}`,
         amount: volume,
-        entryNature: order.type === 'BUY' ? 'DEBIT' : 'CREDIT',
+        entryNature: order.type === "BUY" ? "DEBIT" : "CREDIT",
         runningBalance: newMetalBalance.toFixed(2),
         transactionDetails: {
           type: null,
-          asset: 'GOLD',
+          asset: "GOLD",
           previousBalance: currentMetalBalance,
         },
         user: order.user,
         adminId: adminId,
         date: new Date(sanitizedData.closingDate),
-        notes: `Gold ${order.type === 'BUY' ? 'removed from' : 'added to'} account for closing ${order.type} order`,
+        notes: `Gold ${
+          order.type === "BUY" ? "removed from" : "added to"
+        } account for closing ${order.type} order`,
       });
       await goldTransactionLedgerEntry.save({ session: mongoSession });
+
+      // Add AMOUNTFC transaction ledger entry
+      const amountFCLedgerEntry = new Ledger({
+        entryId: generateEntryId("TRX"),
+        entryType: "TRANSACTION",
+        referenceNumber: order.orderNo,
+        description: `AMOUNTFC ${
+          clientProfit >= 0 ? "profit" : "loss"
+        } for closing trade ${order.orderNo}`,
+        amount: Math.abs(clientProfit).toFixed(2),
+        entryNature: clientProfit >= 0 ? "CREDIT" : "DEBIT",
+        runningBalance: newAMOUNTFC.toFixed(2),
+        transactionDetails: {
+          type: null,
+          asset: "CASH",
+          previousBalance: currentAMOUNTFC,
+        },
+        user: order.user,
+        adminId: adminId,
+        date: new Date(sanitizedData.closingDate),
+        notes: `AMOUNTFC updated with ${
+          clientProfit >= 0 ? "profit" : "loss"
+        } from closed ${order.type} order`,
+      });
+      await amountFCLedgerEntry.save({ session: mongoSession });
     }
 
     if (!session) {
@@ -624,9 +832,10 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
       balances: {
         cash: newCashBalance,
         gold: newMetalBalance,
+        AMOUNTFC: newAMOUNTFC,
       },
       profit: {
-        client: clientProfit,
+        client: clientProfit, // Always CRM calculated profit
         lp: lpPosition ? parseFloat(lpPosition.profit) : 0,
       },
     };
@@ -635,22 +844,39 @@ export const updateTradeStatus = async (adminId, orderId, updateData, session = 
       try {
         await mongoSession.abortTransaction();
       } catch (abortError) {
-        console.error(`Failed to abort transaction for orderId ${orderId}: ${abortError.message}`);
+        console.error(
+          `Failed to abort transaction for orderId ${orderId}: ${abortError.message}`
+        );
       }
     }
-    console.error(`Trade update error for orderId ${orderId}: ${error.message}, Stack: ${error.stack}`);
+    console.error(
+      `Trade update error for orderId ${orderId}: ${error.message}, Stack: ${error.stack}`
+    );
     throw new Error(`Error updating trade: ${error.message}`);
   } finally {
     if (!session && !sessionEnded) {
       try {
         mongoSession.endSession();
       } catch (endError) {
-        console.error(`Failed to end session for orderId ${orderId}: ${endError.message}`);
+        console.error(
+          `Failed to end session for orderId ${orderId}: ${endError.message}`
+        );
       }
     }
   }
 };
 
+export const getLPProfitOrders = async () => {
+  try {
+    const LPProfitInfo = await LPProfit.find({})
+      .populate("user", "_id firstName lastName ACCOUNT_HEAD")
+      .sort({ datetime: -1 });
+
+    return LPProfitInfo;
+  } catch (error) {
+    throw new Error(`Error fetching trades: ${error.message}`);
+  }
+};
 // Other service functions (unchanged)
 export const getTradesByUser = async (adminId, userId) => {
   try {
@@ -658,8 +884,8 @@ export const getTradesByUser = async (adminId, userId) => {
       adminId: adminId,
     })
       .populate(
-        'user',
-        '_id firstName lastName ACCOUNT_HEAD email phoneNumber userSpread accountStatus'
+        "user",
+        "_id firstName lastName ACCOUNT_HEAD email phoneNumber bidSpread askSpread accountStatus"
       )
       .sort({ createdAt: -1 });
 
@@ -676,8 +902,8 @@ export const getOrdersByUser = async (adminId, userId) => {
       user: userId,
     })
       .populate(
-        'user',
-        'firstName lastName ACCOUNT_HEAD email phoneNumber userSpread accountStatus'
+        "user",
+        "firstName lastName ACCOUNT_HEAD email phoneNumber userSpread accountStatus"
       )
       .sort({ createdAt: -1 });
 

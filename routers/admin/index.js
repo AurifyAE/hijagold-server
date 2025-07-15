@@ -27,6 +27,7 @@ import {
   updateTrade,
   getLPTrades,
   getUserOrdersByAdmin,
+  getLPProfitOrdersByAdmin
 } from "../../controllers/admin/tradingController.js";
 import {
   createTransaction,
@@ -60,7 +61,7 @@ router.patch("/order/:adminId/:orderId", updateTrade);
 router.get("/user-orders/:adminId/:userId", getUserOrdersByAdmin);
 router.post("/send-alert/:userId", sendAlertFunction);
 router.put("/freeze-account/:userId", freezeAccount);
-
+router.get("/LPProfit", getLPProfitOrdersByAdmin); // Assuming this is for LPProfit, adjust if needed
 //transaction management
 router.post("/create-transaction/:adminId", createTransaction);
 router.get("/fetch-transaction", getAllTransactions);
