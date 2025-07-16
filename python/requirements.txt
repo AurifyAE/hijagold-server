@@ -1,0 +1,2 @@
+MetaTrader5>=5.0.47
+numpy<2.0.0

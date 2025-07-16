@@ -17,6 +17,121 @@ export const getAllData = async (req, res, next) => {
     next(error);
   }
 };
+export const freezeAccount = async (req, res, next) => {
+  try {
+    const { userId } = req.params;
+    console.log("second");
+    // Update account to set isFreeze to true
+    const updatedAccount = await accountServices.freezeAccount(userId);
+    
+    res.json({
+      status: 200,
+      success: true,
+      data: updatedAccount,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const sendAlertFunction = async (req, res, next) => {
+  try {
+    const { userId } = req.params;
+    const { message } = req.body;
+
+    // Send WhatsApp alert
+    const result = await accountServices.sendWhatsAppAlert(userId, message);
+    
+    res.json({
+      status: 200,
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+
+export const updateBalance = async (req, res, next) => {
+  try {
+    console.log("Processing balance update");
+    console.log("Request body:", req.body);
+    
+    const { userId } = req.params;
+    console.log("User ID from params:", userId);
+    
+    const { amountFC, reservedAmount } = req.body;
+    const io = req.app.get('io');
+
+    // Validation
+    if (!userId) {
+      throw new Error("Invalid user ID");
+    }
+    if (amountFC !== undefined && typeof amountFC !== 'number') {
+      throw new Error("amountFC must be a number");
+    }
+    if (reservedAmount !== undefined && typeof reservedAmount !== 'number') {
+      throw new Error("reservedAmount must be a number");
+    }
+
+    // At least one field should be provided
+    if (amountFC === undefined && reservedAmount === undefined) {
+      throw new Error("At least one field (amountFC or reservedAmount) must be provided");
+    }
+
+    const updatedAccount = await accountServices.updateUserBalance(userId, amountFC, reservedAmount, io);
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        userId,
+        AMOUNTFC: updatedAccount.AMOUNTFC,
+        reservedAmount: updatedAccount.reservedAmount || 0,
+        ACCOUNT_HEAD: updatedAccount.ACCOUNT_HEAD,
+      },
+    });
+  } catch (error) {
+    console.error("Error in updateBalance:", error.message);
+    next(error);
+  }
+};
+
+// Fixed getBalance controller
+export const getBalance = async (req, res, next) => {
+  try {
+    console.log("Processing balance retrieval");
+    // console.log("Request body:", req.body);
+    
+    const { userId } = req.params;
+    console.log("User ID:", userId);
+    
+    const io = req.app.get('io');
+
+    if (!userId) {
+      throw new Error("Invalid user ID");
+    }
+
+    // Use the dedicated getUserBalanceOnly function (recommended)
+    const account = await accountServices.getUserBalance(userId, io);
+    
+    // Or use the corrected getUserBalance function
+    // const account = await getUserBalance(userId, io);
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        userId,
+        AMOUNTFC: account.AMOUNTFC,
+        reservedAmount: account.reservedAmount || 0,
+        ACCOUNT_HEAD: account.ACCOUNT_HEAD,
+      },
+    });
+  } catch (error) {
+    console.error("Error in getBalance:", error.message);
+    next(error);
+  }
+};
 export const adminTokenVerificationApi = async (req, res, next) => {
   try {
     const token = req.body.token;

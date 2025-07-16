@@ -21,41 +21,22 @@ export const checkSufficientBalance = async (accountId, volume) => {
 
     const userBalance = parseFloat(account.AMOUNTFC);
     const volumeValue = parseInt(volume) || 0;
-    if (volumeValue <= 0) {
-      return { success: false, message: "Volume must be at least 1" };
-    }
-
-    const baseAmount = volumeValue * BASE_AMOUNT_PER_VOLUME;
-    const marginRequirement = baseAmount * (MINIMUM_BALANCE_PERCENTAGE / 100);
-    const totalRequiredAmount = baseAmount + marginRequirement;
-
-    const openOrders = await Order.find({ user: accountId, orderStatus: "PROCESSING" });
-    const existingVolume = openOrders.reduce((total, order) => total + (parseInt(order.volume) || 0), 0);
-    const existingOrdersAmount = existingVolume * BASE_AMOUNT_PER_VOLUME;
-    const existingOrdersMargin = existingOrdersAmount * (MINIMUM_BALANCE_PERCENTAGE / 100);
-    const totalExistingAmount = existingOrdersAmount + existingOrdersMargin;
-    const totalNeededAmount = totalRequiredAmount + totalExistingAmount;
-    const remainingBalance = userBalance - totalNeededAmount;
-    const maxAllowedVolume = Math.floor(
-      (userBalance - totalExistingAmount) /
-      (BASE_AMOUNT_PER_VOLUME * (1 + MINIMUM_BALANCE_PERCENTAGE / 100))
-    );
-
-    const isTradeValid = remainingBalance >= 0 && volumeValue > 0;
+   
+    // Calculate required amount (2% of account balance)
+    const requiredAmount = userBalance * 0.02; // 2% of account balance
+    
+    // Check if user has sufficient balance (2% of their account)
+    const isTradeValid = userBalance >= requiredAmount;
 
     return {
       success: isTradeValid,
       userBalance: userBalance.toFixed(2),
-      baseAmount: baseAmount.toFixed(2),
-      marginAmount: marginRequirement.toFixed(2),
-      totalAmount: totalRequiredAmount.toFixed(2),
-      existingVolume,
-      existingAmount: totalExistingAmount.toFixed(2),
-      totalNeededAmount: totalNeededAmount.toFixed(2),
-      remainingBalance: remainingBalance.toFixed(2),
-      remainingPercentage: ((remainingBalance / userBalance) * 100).toFixed(1),
-      maxAllowedVolume,
-      message: isTradeValid ? "Sufficient balance for trade" : `Insufficient balance. Maximum allowed volume is ${maxAllowedVolume}`,
+      requiredAmount: requiredAmount.toFixed(2), // 2% of balance
+      remainingBalance: (userBalance - requiredAmount).toFixed(2),
+      remainingPercentage: "98.0", // Always 98% remaining after using 2%
+      message: isTradeValid 
+        ? "Sufficient balance for trade" 
+        : "Insufficient balance. Account must have at least 2% available for trading",
     };
   } catch (error) {
     console.error("Error checking sufficient balance:", error);

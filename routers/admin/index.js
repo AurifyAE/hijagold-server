@@ -11,15 +11,23 @@ import {
   deleteAccount,
   getUserProfile,
   updateUserProfile,
-  adminTokenVerificationApi
+  adminTokenVerificationApi,
+  updateBalance,
+  getBalance,
+  freezeAccount,
+  sendAlertFunction,
 } from "../../controllers/admin/accountControllers.js";
-import { getAdminProfile, loginAdmin } from "../../controllers/superAdmin/adminControllers.js";
+import {
+  getAdminProfile,
+  loginAdmin,
+} from "../../controllers/superAdmin/adminControllers.js";
 import {
   createTrade,
   getUserTrades,
   updateTrade,
   getLPTrades,
   getUserOrdersByAdmin,
+  getLPProfitOrdersByAdmin
 } from "../../controllers/admin/tradingController.js";
 import {
   createTransaction,
@@ -37,6 +45,8 @@ router.put("/update-margin/:adminId", updateMarginAmount);
 router.put("/update-favorite/:adminId", updateFavoriteStatus);
 router.get("/fetch-filter", filterAccounts);
 //profile management
+router.put("/update-balance/:userId", updateBalance);
+router.get("/balance/:userId", getBalance);
 router.post("/accounts/:adminId", insertAccount);
 router.put("/accounts/:ACCODE/:adminId", updateAccount);
 router.delete("/accounts/:ACCODE/:adminId", deleteAccount);
@@ -49,6 +59,9 @@ router.get("/order/:adminId", getUserTrades);
 router.get("/lp-order/:adminId", getLPTrades);
 router.patch("/order/:adminId/:orderId", updateTrade);
 router.get("/user-orders/:adminId/:userId", getUserOrdersByAdmin);
+router.post("/send-alert/:userId", sendAlertFunction);
+router.put("/freeze-account/:userId", freezeAccount);
+router.get("/LPProfit", getLPProfitOrdersByAdmin); // Assuming this is for LPProfit, adjust if needed
 //transaction management
 router.post("/create-transaction/:adminId", createTransaction);
 router.get("/fetch-transaction", getAllTransactions);

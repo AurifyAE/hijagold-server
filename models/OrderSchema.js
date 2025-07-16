@@ -58,9 +58,13 @@ const OrderSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    storedTime: {
+      type: Date,
+      default: Date.now,
+    },
     orderStatus: {
       type: String,
-      enum: ["PROCESSING", "EXECUTED", "CANCELLED", "CLOSED", "PENDING"],
+      enum: ["PROCESSING", "OPEN", "FAILED", "EXECUTED", "CANCELLED", "CLOSED", "PENDING"],
       default: "PROCESSING",
     },
     profit: {
@@ -82,13 +86,23 @@ const OrderSchema = new mongoose.Schema(
       ref: "LPPosition",
       default: null,
     },
+    ticket: {
+      type: String,
+      default: null,
+    },
     comment: {
       type: String,
       default: "",
     },
+    notificationError: {
+      type: String,
+      default: null,
+    },
   },
   { timestamps: true }
 );
+
+// OrderSchema.index({ orderNo: 1 }, { unique: true });
 
 const Order = mongoose.model("Order", OrderSchema);
 

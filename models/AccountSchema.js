@@ -2,7 +2,6 @@ import mongoose from "mongoose";
 
 const AccountSchema = new mongoose.Schema(
   {
-    // Existing fields
     REFMID: {
       type: Number,
       required: true,
@@ -19,6 +18,10 @@ const AccountSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
+    reservedAmount: {
+      type: Number,
+      required: true,
+    },
     METAL_WT: {
       type: Number,
       required: true,
@@ -30,6 +33,10 @@ const AccountSchema = new mongoose.Schema(
     Account_Type: {
       type: String,
       required: true,
+    },
+    isFreeze: {
+      type: Boolean,
+      default: false,
     },
     is_favorite: {
       type: Boolean,
@@ -55,11 +62,17 @@ const AccountSchema = new mongoose.Schema(
     email: {
       type: String,
       default: null,
-      sparse: true, // Allows multiple null values while still enabling uniqueness for non-null values
+      sparse: true,
     },
     phoneNumber: {
       type: String,
       default: null,
+      // required: true,
+      match: [
+        /^\+\d{10,15}$/,
+        "Phone number must be in E.164 format (e.g., +918138823410)",
+      ],
+      unique: true,
     },
     address: {
       street: { type: String, default: null },
@@ -90,6 +103,7 @@ const AccountSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    lastUpdated: { type: Date, default: null },
   },
   { timestamps: true }
 );
