@@ -672,18 +672,22 @@ export const updateTradeStatus = async (
         ? closingGoldWeightValue
         : entryGoldWeightValue;
 
+        console.log(`Settlement Amount: ${settlementAmount}`);
       const userProfit = clientProfit > 0 ? clientProfit : 0;
-
+      console.log(`User Profit: ${userProfit}`);
+      console.log(newAMOUNTFC)
       if (order.type === "BUY") {
-        newCashBalance = currentCashBalance + settlementAmount + userProfit;
+        newCashBalance = currentCashBalance + settlementAmount + clientProfit;
+        newAMOUNTFC = currentAMOUNTFC + clientProfit;
         newMetalBalance = currentMetalBalance - volume;
       } else if (order.type === "SELL") {
-        newCashBalance = currentCashBalance + settlementAmount + userProfit;
+        newCashBalance = currentCashBalance + settlementAmount + clientProfit;
+        newAMOUNTFC = currentAMOUNTFC + clientProfit;
         newMetalBalance = currentMetalBalance + volume;
       }
 
       // Update AMOUNTFC with only the profit amount (can be negative)
-      newAMOUNTFC = currentAMOUNTFC + clientProfit;
+      // newAMOUNTFC = currentAMOUNTFC + clientProfit;
 
       await Account.findByIdAndUpdate(
         order.user,
