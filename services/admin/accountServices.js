@@ -335,6 +335,7 @@ export const createAccount = async (accountData, adminId) => {
     await newAccount.save();
     return newAccount;
   } catch (error) {
+    console.log(error)
     if (error.code === 11000) {
       throw createAppError("Account with this code already exists", 400);
     }

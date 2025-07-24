@@ -72,7 +72,7 @@ const AccountSchema = new mongoose.Schema(
         /^\+\d{10,15}$/,
         "Phone number must be in E.164 format (e.g., +918138823410)",
       ],
-      unique: true,
+      // unique: true,
     },
     address: {
       street: { type: String, default: null },
