@@ -75,11 +75,14 @@ export const createTrade = async (req, res, next) => {
       volume,
       symbol,
       price,
+      openingPrice,
       requiredMargin,
       comment,
       stopLoss,
       takeProfit
     } = req.body;
+
+    console.log(`Received trade request: ${JSON.stringify(req.body, null, 2)}`);
     // Validate trade data
     const validationError = validateTradeData(req.body);
     if (validationError) {
@@ -109,6 +112,7 @@ export const createTrade = async (req, res, next) => {
       volume: parseFloat(volume),
       symbol,
       price: parseFloat(price),
+      openingPrice: parseFloat(openingPrice),
       requiredMargin: parseFloat(requiredMargin),
       comment: comment || `Ord-${orderNo}-${phoneNumber.slice(-4)}`,
       openingDate: new Date(),
@@ -120,7 +124,7 @@ export const createTrade = async (req, res, next) => {
     const confirmationMessage = `✅ Order Placed!\n📋 Type: ${
       tradeResult.mt5Trade.type
     }\n💰 Volume: ${tradeResult.mt5Trade.volume} grams\n💵 Price: $${parseFloat(
-      price
+      openingPrice
     ).toFixed(2)}\n📊 Order ID: ${tradeResult.mt5Trade.ticket}\n📡 Symbol: ${
       tradeResult.mt5Trade.symbol
     }\n🕒 ${new Date().toLocaleString("en-US", {

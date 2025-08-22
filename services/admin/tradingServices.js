@@ -42,7 +42,7 @@ export const createTrade = async (
 
     const currentCashBalance = parseFloat(userAccount.reservedAmount);
     const currentMetalBalance = parseFloat(userAccount.METAL_WT);
-    const currentPrice = parseFloat(tradeData.price);
+    const currentPrice = parseFloat(tradeData.openingPrice);
     const volume = parseFloat(tradeData.volume);
 
     // Check sufficient balances
@@ -80,8 +80,8 @@ export const createTrade = async (
       volume: tradeData.volume,
       symbol: tradeData.symbol,
       requiredMargin: requiredMargin,
-      price: currentPrice,
-      openingPrice: clientOrderPrice.toFixed(2),
+      price: tradeData.price.toFixed(2),
+      openingPrice: currentPrice.toFixed(2),
       profit: 0,
       user: userId,
       adminId: adminId,
@@ -105,9 +105,9 @@ export const createTrade = async (
       volume: tradeData.volume,
       adminId: adminId,
       symbol: tradeData.symbol,
-      entryPrice: currentPrice,
+      entryPrice:  tradeData.price.toFixed(2),
       openDate: tradeData.openingDate,
-      currentPrice: currentPrice,
+      currentPrice:  tradeData.price.toFixed(2),
       clientOrders: savedOrder._id,
       status: "OPEN",
     });
@@ -559,8 +559,8 @@ export const updateTradeStatus = async (
     }).session(mongoSession);
     if (lpPosition) {
       if (sanitizedData.closingPrice) {
-        lpPosition.closingPrice = currentPrice;
-        lpPosition.currentPrice = currentPrice;
+        lpPosition.closingPrice =  mt5CloseResult.closePrice || mt5CloseResult.data.price;
+        lpPosition.currentPrice =  mt5CloseResult.closePrice || mt5CloseResult.data.price;
       }
       if (sanitizedData.closingDate) {
         lpPosition.closeDate = sanitizedData.closingDate;
