@@ -24,16 +24,16 @@ const AccountSchema = new mongoose.Schema(
     },
     METAL_WT: {
       type: Number,
-      required: true,
+      default: 0,
     },
     margin: {
       type: Number,
       default: 0,
     },
-    Account_Type: {
-      type: String,
-      required: true,
-    },
+    // Account_Type: {
+    //   type: String,
+    //   required: true,
+    // },
     isFreeze: {
       type: Boolean,
       default: false,
