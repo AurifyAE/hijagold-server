@@ -202,7 +202,7 @@ export const updateTrade = async (req, res, next) => {
   let phoneNumber;
   try {
     const { adminId, orderId } = req.params;
-    const { orderStatus, profit, closingPrice } = req.body;
+    const { orderStatus, profit, closingPrice, forceClose } = req.body;
 
     // Validate input
     if (!mongoose.Types.ObjectId.isValid(orderId)) {
@@ -212,14 +212,16 @@ export const updateTrade = async (req, res, next) => {
       throw new Error("Invalid or missing orderStatus: must be CLOSED");
     }
 
-    // Fetch order to get ticket and other details
+    // Fetch order to get details
     const order = await Order.findOne({ _id: orderId, adminId });
     if (!order) {
       throw new Error(
         `Order not found for orderId: ${orderId}, adminId: ${adminId}`
       );
     }
-    if (order.orderStatus === "CLOSED") {
+
+    // Check if already closed unless force close is requested
+    if (order.orderStatus === "CLOSED" && !forceClose) {
       throw new Error(`Order ${orderId} is already closed`);
     }
 
@@ -243,12 +245,15 @@ export const updateTrade = async (req, res, next) => {
       ticket: order.ticket,
       symbol: order.symbol,
       volume: order.volume,
-      type: order.type === "BUY" ? "SELL" : "BUY", // Opposite type for closing
+      type: order.type,
       openingPrice: order.openingPrice,
       profit: profit || 0,
       closingPrice: closingPrice,
+      forceClose: forceClose || false,
     };
-    console.log(updateData);
+
+    console.log('Sending update data:', updateData);
+
     // Update trade status (includes MT5 closure)
     const updatedTrade = await tradingServices.updateTradeStatus(
       adminId,
@@ -257,13 +262,13 @@ export const updateTrade = async (req, res, next) => {
     );
 
     // Send WhatsApp confirmation message
+    const mt5StatusText = updatedTrade.mt5Status?.closed 
+      ? "✅ MT5 Closed" 
+      : "⚠️ MT5 Status Unknown";
+    
     const successMessage = `✅ Position Closed Successfully!\n📊 Ticket: ${
       order.ticket
-    }\n💰 Close Price: $${updatedTrade.order.closingPrice.toFixed(
-      2
-    )}\n📈 P&L: AED ${updatedTrade.order.profit.toFixed(
-      2
-    )}\n🕒 ${new Date().toLocaleString("en-US", {
+    }\n💰 Close Price: $${updatedTrade.order.closingPrice}\n📈 P&L: AED ${updatedTrade.order.profit}\n🔄 ${mt5StatusText}\n🕒 ${new Date().toLocaleString("en-US", {
       timeZone: "Asia/Dubai",
     })}\n\n${await getMainMenuMT5()}`;
 
@@ -289,7 +294,10 @@ export const updateTrade = async (req, res, next) => {
       status: 200,
       success: true,
       message: "Trade updated successfully",
-      data: updatedTrade,
+      data: {
+        ...updatedTrade,
+        mt5Synchronized: updatedTrade.mt5Status?.closed || false,
+      },
     });
   } catch (error) {
     console.error(
@@ -300,11 +308,12 @@ export const updateTrade = async (req, res, next) => {
     const errorMessage = `❌ Error Closing Position\n📊 Order ID: ${
       req.params.orderId
     }\n📝 Error: ${error.message}\n\n${await getMainMenuMT5()}`;
+    
     try {
       await client.messages.create({
         body: errorMessage,
         from: twilioPhoneNumber,
-        to: phoneNumber || "whatsapp:+918138823410", // Fallback phone number
+        to: phoneNumber || "whatsapp:+918138823410",
       });
       console.log(
         `WhatsApp error message sent to ${
@@ -328,6 +337,7 @@ export const updateTrade = async (req, res, next) => {
     });
   }
 };
+
 
 // Other controller functions (unchanged)
 export const getUserTrades = async (req, res, next) => {

@@ -220,32 +220,7 @@ export const createTrade = async (
     });
     await cashTransactionLedgerEntry.save({ session: mongoSession });
 
-    const goldTransactionLedgerEntry = new Ledger({
-      entryId: generateEntryId("TRX"),
-      entryType: "TRANSACTION",
-      referenceNumber: tradeData.orderNo,
-      description: `Gold ${
-        tradeData.type === "BUY" ? "credit" : "debit"
-      } for trade ${tradeData.orderNo}`,
-      amount: tradeData.volume,
-      entryNature: tradeData.type === "BUY" ? "CREDIT" : "DEBIT",
-      runningBalance: newMetalBalance.toFixed(2),
-      transactionDetails: {
-        type: null,
-        asset: "GOLD",
-        previousBalance: currentMetalBalance,
-      },
-      user: userId,
-      adminId: adminId,
-      date: new Date(tradeData.openingDate),
-      notes: `Gold weight (${tradeData.volume}) ${
-        tradeData.type === "BUY" ? "added to" : "subtracted from"
-      } account for ${
-        tradeData.type
-      } order (Value: AED ${requiredMargin.toFixed(2)})`,
-    });
-    await goldTransactionLedgerEntry.save({ session: mongoSession });
-
+   
     // Validate and place MT5 trade
    const mt5Symbol = SYMBOL_MAPPING[tradeData.symbol];
   if (!mt5Symbol) {
@@ -339,7 +314,6 @@ export const createTrade = async (
         order: orderLedgerEntry,
         lp: lpLedgerEntry,
         cashTransaction: cashTransactionLedgerEntry,
-        goldTransaction: goldTransactionLedgerEntry,
       },
     };
   } catch (error) {
@@ -430,6 +404,8 @@ export const updateTradeStatus = async (
     }
 
     let mt5CloseResult = null;
+    let actualClosingPrice = null;
+
     if (
       sanitizedData.orderStatus === "CLOSED" &&
       order.orderStatus !== "CLOSED"
@@ -465,13 +441,17 @@ export const updateTradeStatus = async (
             const priceData = await mt5Service.getPrice(
               SYMBOL_MAPPING[order.symbol] || order.symbol
             );
-            if (!priceData || !priceData.bid || !priceData.ask) {
+            console.log(`Price data received: ${JSON.stringify(priceData)}`);
+            
+            if (!priceData || (!priceData.bid && !priceData.ask)) {
               throw new Error(
                 `No valid price quote available for ${order.symbol}`
               );
             }
-            sanitizedData.closingPrice =
-              order.type === "BUY" ? priceData.bid : priceData.ask;
+            
+            // Use the appropriate price based on order type
+            actualClosingPrice = order.type === "BUY" ? priceData.bid : priceData.ask;
+            sanitizedData.closingPrice = actualClosingPrice;
           } else {
             throw new Error(
               `MT5 trade closure failed: ${
@@ -480,8 +460,9 @@ export const updateTradeStatus = async (
             );
           }
         } else {
-          sanitizedData.closingPrice =
-            mt5CloseResult.closePrice || mt5CloseResult.data.price;
+          // MT5 closure was successful
+          actualClosingPrice = mt5CloseResult.closePrice || mt5CloseResult.data?.price;
+          sanitizedData.closingPrice = actualClosingPrice;
         }
       } catch (mt5Error) {
         console.error(
@@ -495,22 +476,37 @@ export const updateTradeStatus = async (
           console.warn(
             `Position ${order.ticket} not found in MT5. Assuming already closed.`
           );
-          const priceData = await mt5Service.getPrice(
-            SYMBOL_MAPPING[order.symbol] || order.symbol
-          );
-          if (!priceData || !priceData.bid || !priceData.ask) {
-            throw new Error(`No valid price quote available for ${order.symbol}`);
+          try {
+            const priceData = await mt5Service.getPrice(
+              SYMBOL_MAPPING[order.symbol] || order.symbol
+            );
+            console.log(`Fallback price data received: ${JSON.stringify(priceData)}`);
+            
+            if (!priceData || (!priceData.bid && !priceData.ask)) {
+              // If we can't get current price, use the last known price or opening price
+              console.warn(`No current price available, using opening price as fallback`);
+              actualClosingPrice = parseFloat(order.openingPrice);
+            } else {
+              actualClosingPrice = order.type === "BUY" ? priceData.bid : priceData.ask;
+            }
+            
+            sanitizedData.closingPrice = actualClosingPrice;
+          } catch (priceError) {
+            console.error(`Failed to get price data: ${priceError.message}`);
+            // Use opening price as last resort
+            actualClosingPrice = parseFloat(order.openingPrice);
+            sanitizedData.closingPrice = actualClosingPrice;
           }
-          sanitizedData.closingPrice =
-            order.type === "BUY" ? priceData.bid : priceData.ask;
         } else {
           throw new Error(`Failed to close MT5 trade: ${mt5Error.message}`);
         }
       }
     }
 
-    const currentPrice = parseFloat(sanitizedData.closingPrice);
+    // Ensure we have a valid closing price for calculations
+    const currentPrice = actualClosingPrice || parseFloat(sanitizedData.closingPrice);
     let clientClosingPrice = currentPrice;
+    
     if (order.type === "BUY") {
       clientClosingPrice = currentPrice - (userAccount.bidSpread || 0);
     } else {
@@ -557,10 +553,13 @@ export const updateTradeStatus = async (
     const lpPosition = await LPPosition.findOne({
       positionId: order.orderNo,
     }).session(mongoSession);
+    
     if (lpPosition) {
       if (sanitizedData.closingPrice) {
-        lpPosition.closingPrice =  mt5CloseResult.closePrice || mt5CloseResult.data.price;
-        lpPosition.currentPrice =  mt5CloseResult.closePrice || mt5CloseResult.data.price;
+        // Use actual MT5 closing price for LP position, fallback to current price
+        const lpClosingPrice = (mt5CloseResult?.closePrice || mt5CloseResult?.data?.price || currentPrice);
+        lpPosition.closingPrice = lpClosingPrice;
+        lpPosition.currentPrice = lpClosingPrice;
       }
       if (sanitizedData.closingDate) {
         lpPosition.closeDate = sanitizedData.closingDate;
@@ -730,30 +729,6 @@ export const updateTradeStatus = async (
       });
       await cashTransactionLedgerEntry.save({ session: mongoSession });
 
-      const goldTransactionLedgerEntry = new Ledger({
-        entryId: generateEntryId("TRX"),
-        entryType: "TRANSACTION",
-        referenceNumber: order.orderNo,
-        description: `Gold ${
-          order.type === "BUY" ? "debit" : "credit"
-        } for closing trade ${order.orderNo}`,
-        amount: volume,
-        entryNature: order.type === "BUY" ? "DEBIT" : "CREDIT",
-        runningBalance: newMetalBalance.toFixed(2),
-        transactionDetails: {
-          type: null,
-          asset: "GOLD",
-          previousBalance: currentMetalBalance,
-        },
-        user: order.user,
-        adminId: adminId,
-        date: new Date(sanitizedData.closingDate),
-        notes: `Gold ${
-          order.type === "BUY" ? "removed from" : "added to"
-        } account for closing ${order.type} order`,
-      });
-      await goldTransactionLedgerEntry.save({ session: mongoSession });
-
       const amountFCLedgerEntry = new Ledger({
         entryId: generateEntryId("TRX"),
         entryType: "TRANSACTION",
@@ -785,6 +760,8 @@ export const updateTradeStatus = async (
       mongoSession.endSession();
       sessionEnded = true;
     }
+
+    console.log(`Trade ${order.orderNo} successfully updated to ${sanitizedData.orderStatus || 'current'} status`);
 
     return {
       order,
