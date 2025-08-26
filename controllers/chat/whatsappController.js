@@ -35,9 +35,28 @@ const client = new Twilio(accountSid, authToken);
 
 // Constants
 const SYMBOL_MAPPING = { GOLD: "XAUUSD.#" };
-const UNAUTHORIZED_MESSAGE = `🚫 *Access Denied*\n\nYour number is not registered.\nContact support:\n📞 *Ajmal TK* – Aurify Technologies\n📱 +971 58 502 3411\n\nWe're here to help! 💬`;
-const ERROR_MESSAGE =
-  "❌ An error occurred. Please try again or contact support.";
+const UNAUTHORIZED_MESSAGE = `🚫 *Access Denied*
+
+┌─────────────────────────┐
+│    🔐 *UNAUTHORIZED*    │
+└─────────────────────────┘
+
+Your number is not registered.
+
+📞 *Contact Support:*
+Ajmal TK – Aurify Technologies
+📱 +971 58 502 3411
+
+💬 *We're here to help!*`;
+const ERROR_MESSAGE = `❌ *ERROR OCCURRED*
+
+┌─────────────────────────┐
+│   🔧 *SYSTEM ERROR*     │
+└─────────────────────────┘
+
+Something went wrong. Please try again.
+
+🔙 Type *MENU* to return`;
 const MINIMUM_BALANCE_PERCENTAGE = 2;
 const TROY_OUNCE_GRAMS = 31.103;
 const TTB_FACTOR = 116.64;
@@ -65,7 +84,7 @@ const generateEntryId = (prefix) => {
 // Enhanced deduplication check
 const isDuplicateMessage = (messageSid, from, body) => {
   const primaryKey = messageSid;
-  const fallbackKey = `${from}:${body}:${Math.floor(Date.now() / 1000)}`; // 1-second window
+  const fallbackKey = `${from}:${body}:${Math.floor(Date.now() / 1000)}`;
 
   const existingState =
     messageProcessingState.get(primaryKey) ||
@@ -73,16 +92,12 @@ const isDuplicateMessage = (messageSid, from, body) => {
 
   if (existingState) {
     const timeDiff = Date.now() - existingState.timestamp;
-
-    // If still processing or recently completed, it's a duplicate
     if (
       existingState.state === PROCESSING_STATES.PROCESSING ||
       (existingState.state === PROCESSING_STATES.COMPLETED && timeDiff < 5000)
     ) {
       return true;
     }
-
-    // Clean up old failed attempts
     if (
       existingState.state === PROCESSING_STATES.FAILED &&
       timeDiff > PROCESSING_TIMEOUT
@@ -91,7 +106,6 @@ const isDuplicateMessage = (messageSid, from, body) => {
       messageProcessingState.delete(fallbackKey);
     }
   }
-
   return false;
 };
 
@@ -108,7 +122,6 @@ const markMessageProcessing = (messageSid, from, body) => {
   messageProcessingState.set(primaryKey, processingData);
   messageProcessingState.set(fallbackKey, processingData);
 
-  // Auto-cleanup after timeout
   setTimeout(() => {
     const current = messageProcessingState.get(primaryKey);
     if (current && current.state === PROCESSING_STATES.PROCESSING) {
@@ -133,10 +146,26 @@ const markMessageComplete = (keys, success = true) => {
     messageProcessingState.set(key, { state, timestamp });
   });
 
-  // Cleanup after TTL
   setTimeout(() => {
     keys.forEach((key) => messageProcessingState.delete(key));
   }, MESSAGE_CACHE_TTL);
+};
+
+// Utility function to format currency
+const formatCurrency = (amount) => {
+  return new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount || 0);
+};
+
+// Time-based greeting function
+const getTimeBasedGreeting = () => {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good Morning";
+  if (hour < 17) return "Good Afternoon";
+  if (hour < 21) return "Good Evening";
+  return "Good Night";
 };
 
 // Enhanced transaction wrapper for safe operations
@@ -161,8 +190,6 @@ const executeInTransaction = async (operation, maxRetries = 3) => {
       return { success: true, result };
     } catch (error) {
       lastError = error;
-
-      // Only abort if transaction was started but not committed
       if (transactionStarted && !transactionCommitted) {
         try {
           await mongoSession.abortTransaction();
@@ -174,14 +201,11 @@ const executeInTransaction = async (operation, maxRetries = 3) => {
           );
         }
       }
-
       console.error(
         `Transaction failed (attempt ${attempt + 1}/${maxRetries}): ${
           error.message
         }`
       );
-
-      // Don't retry on certain errors
       if (
         error.message.includes("already closed") ||
         error.message.includes("not found") ||
@@ -189,10 +213,7 @@ const executeInTransaction = async (operation, maxRetries = 3) => {
       ) {
         break;
       }
-
       attempt++;
-
-      // Wait before retry
       if (attempt < maxRetries) {
         await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
       }
@@ -204,7 +225,6 @@ const executeInTransaction = async (operation, maxRetries = 3) => {
       }
     }
   }
-
   return { success: false, error: lastError };
 };
 
@@ -325,11 +345,7 @@ const sendMessage = async (to, message, retries = 2) => {
           error.message
         }, code: ${error.code}`
       );
-
-      // Don't retry on certain errors
       if (error.code === 63016 || error.code === 21211) break;
-
-      // Wait before retry
       if (attempt < retries) {
         await new Promise((resolve) =>
           setTimeout(resolve, 1000 * (attempt + 1))
@@ -338,7 +354,6 @@ const sendMessage = async (to, message, retries = 2) => {
     }
   }
 
-  // Log error to database
   try {
     const { userId, adminId } = (await getUserIdFromPhoneNumber(to)) || {};
     if (userId && adminId) {
@@ -352,6 +367,425 @@ const sendMessage = async (to, message, retries = 2) => {
   }
 
   return { success: false, error: lastError };
+};
+
+// Enhanced Message Templates
+// Welcome Message Template with Balance Display
+const createWelcomeMessage = async (
+  userName,
+  equity,
+  availableBalance,
+  goldPrice
+) => {
+  const totalPortfolioValue = equity + availableBalance;
+  const greeting = getTimeBasedGreeting();
+
+  return `🌟 *${greeting}, ${userName || "Valued Client"}!* 🌟
+
+┌─────────────────────────┐
+│  🏦 *ACCOUNT OVERVIEW*  │
+└─────────────────────────┘
+
+💰 *Equity Balance:* $${formatCurrency(equity)}
+💵 *Available Balance:* $${formatCurrency(availableBalance)}
+📊 *Total Portfolio:* $${formatCurrency(totalPortfolioValue)}
+
+┌─────────────────────────┐
+│  📈 *LIVE MARKET DATA*  │
+└─────────────────────────┘
+🥇 *Gold (XAU/USD):* $${goldPrice?.toFixed(2) || "Loading..."}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 *Ready to start trading?* 
+Choose an option below:
+
+${await getMainMenuMT5()}`;
+};
+
+// Enhanced Main Menu Template
+const getEnhancedMainMenuMT5 = async () => {
+  return `┌─────────────────────────┐
+│    📱 *TRADING MENU*    │
+└─────────────────────────┘
+
+🟢 *1* │ 📈 *BUY GOLD*
+🔴 *2* │ 📉 *SELL GOLD*  
+📊 *3* │ 💹 *LIVE PRICES*
+📋 *4* │ 🔍 *MY POSITIONS*
+💰 *5* │ 💳 *BALANCE*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *Quick Commands:*
+• Type *PRICE* for instant quotes
+• Type *HELP* for assistance
+• Type *REFRESH* to update data
+
+💬 *Simply type a number to continue...*`;
+};
+
+// Enhanced Balance Display Template
+const createBalanceMessage = async (
+  equity,
+  availableBalance,
+  goldPrice,
+  goldHolding = 0
+) => {
+  const goldValue = goldHolding * goldPrice;
+  const totalPortfolio = equity + availableBalance + goldValue;
+  const profitLoss = equity - availableBalance; // Assuming equity includes unrealized P&L
+  const profitColor = profitLoss >= 0 ? "🟢" : "🔴";
+  const profitSign = profitLoss >= 0 ? "+" : "";
+
+  return `┌─────────────────────────┐
+│   💰 *ACCOUNT BALANCE*  │
+└─────────────────────────┘
+
+💎 *Equity:* $${formatCurrency(equity)}
+💵 *Available:* $${formatCurrency(availableBalance)}
+${goldHolding > 0 ? `🥇 *Gold Holdings:* ${goldHolding.toFixed(2)} oz` : ""}
+${goldHolding > 0 ? `📈 *Gold Value:* $${formatCurrency(goldValue)}` : ""}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 *Total Portfolio:* $${formatCurrency(totalPortfolio)}
+${profitColor} *Unrealized P&L:* ${profitSign}$${Math.abs(profitLoss).toFixed(
+    2
+  )}
+
+🕒 *Last Updated:* ${new Date().toLocaleString("en-US", {
+    timeZone: "Asia/Dubai",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  })} UAE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 *Ready to trade? Type MENU*`;
+};
+
+// Enhanced Price Display Template
+const createPriceMessage = async (marketData, spread) => {
+  const timestamp = new Date().toLocaleString("en-US", {
+    timeZone: "Asia/Dubai",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  return `┌─────────────────────────┐
+│   📈 *LIVE GOLD PRICES* │
+└─────────────────────────┘
+
+🥇 *XAUUSD (Gold/USD)*
+
+🟢 *BID:* $${marketData?.bid?.toFixed(2) || "N/A"}
+🔴 *ASK:* $${marketData?.ask?.toFixed(2) || "N/A"}
+📊 *SPREAD:* ${spread?.toFixed(1) || "N/A"} pips
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 *Updated:* ${timestamp} UAE
+🔄 *Auto-refresh every 30 seconds*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *Quick Actions:*
+• Type *1* to BUY at $${marketData?.ask?.toFixed(2) || "N/A"}
+• Type *2* to SELL at $${marketData?.bid?.toFixed(2) || "N/A"}
+• Type *REFRESH* for latest prices`;
+};
+
+// Enhanced Order Confirmation Template
+const createOrderConfirmation = (
+  orderType,
+  volume,
+  price,
+  totalCost,
+  symbol
+) => {
+  const typeEmoji = orderType === "BUY" ? "📈🟢" : "📉🔴";
+  const actionWord = orderType === "BUY" ? "Purchase" : "Sale";
+
+  return `${typeEmoji} *ORDER CONFIRMATION*
+
+┌─────────────────────────┐
+│     📋 *ORDER DETAILS*  │
+└─────────────────────────┘
+
+🎯 *Action:* ${orderType} ${symbol}
+⚖️ *Volume:* ${volume} grams
+💰 *Price:* $${price.toFixed(2)}
+💸 *Total Cost:* $${totalCost.toFixed(2)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ *Please confirm your ${actionWord.toLowerCase()}:*
+
+✅ Type *YES* to execute order
+❌ Type *NO* to cancel
+🔙 Type *MENU* to return
+
+⏰ *This quote expires in 30 seconds*
+🔐 *Secure trading powered by MT5*`;
+};
+
+// Enhanced Order Success Template
+const createOrderSuccessMessage = async (
+  result,
+  orderType,
+  volume,
+  price,
+  symbol,
+  ticket
+) => {
+  const typeEmoji = orderType === "BUY" ? "📈✅" : "📉✅";
+  const timestamp = new Date().toLocaleString("en-US", {
+    timeZone: "Asia/Dubai",
+    dateStyle: "medium",
+    timeStyle: "medium",
+  });
+
+  return `${typeEmoji} *ORDER EXECUTED!*
+
+┌─────────────────────────┐
+│    🎉 *TRADE SUCCESS*   │
+└─────────────────────────┘
+
+🎫 *Ticket:* #${ticket}
+🎯 *Type:* ${orderType} ${symbol}
+⚖️ *Volume:* ${volume} grams
+💰 *Price:* $${price.toFixed(2)}
+💸 *Total:* $${(volume * price).toFixed(2)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🕒 *Executed:* ${timestamp}
+🏦 *Status:* ACTIVE
+📊 *Platform:* MetaTrader 5
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 *What's next?*
+• Type *4* to view positions
+• Type *PRICE* for current rates
+• Type *MENU* for main menu`;
+};
+
+// Enhanced Positions List Template
+const createPositionsMessage = async (positions, totalPL) => {
+  if (!positions || positions.length === 0) {
+    return `┌─────────────────────────┐
+│   📋 *MY POSITIONS*     │
+└─────────────────────────┘
+
+📭 *No open positions found*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 *Ready to start trading?*
+• Type *1* to BUY Gold
+• Type *2* to SELL Gold  
+• Type *MENU* to return
+
+🚀 *Start your first trade today!*`;
+  }
+
+  let positionsText = `┌─────────────────────────┐
+│   📋 *MY POSITIONS*     │
+└─────────────────────────┘
+
+`;
+
+  positions.forEach((pos, index) => {
+    const plColor = pos.profit >= 0 ? "🟢" : "🔴";
+    const plSign = pos.profit >= 0 ? "+" : "";
+
+    positionsText += `${pos.type === "BUY" ? "📈" : "📉"} *${index + 1}.* ${
+      pos.symbol
+    }
+🎫 Ticket: #${pos.ticket}
+⚖️ Volume: ${pos.volume} grams
+💰 Open: $${pos.openPrice?.toFixed(2)}
+📊 Current: $${pos.currentPrice?.toFixed(2)}
+${plColor} P&L: ${plSign}$${pos.profit?.toFixed(2)}
+
+`;
+  });
+
+  const totalColor = totalPL >= 0 ? "🟢" : "🔴";
+  const totalSign = totalPL >= 0 ? "+" : "";
+
+  positionsText += `━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${totalColor} *Total P&L: ${totalSign}$${Math.abs(totalPL).toFixed(2)}*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 *To close a position:*
+Type the position number (1, 2, 3...)
+
+🔙 Type *MENU* to return`;
+
+  return positionsText;
+};
+
+// Enhanced Error Message Template
+const createErrorMessage = async (errorType, details = "") => {
+  const errorTemplates = {
+    INSUFFICIENT_BALANCE: `❌ *INSUFFICIENT BALANCE*
+
+┌─────────────────────────┐
+│   💰 *BALANCE ERROR*    │
+└─────────────────────────┘
+
+🚫 Your available balance is too low for this trade.
+
+${details}
+
+💡 *Solutions:*
+• Reduce your trade volume
+• Check your available balance
+• Contact support for assistance
+
+💬 Type *BALANCE* to check funds
+🔙 Type *MENU* to return`,
+
+    MARKET_CLOSED: `⏰ *MARKET CLOSED*
+
+┌─────────────────────────┐
+│   🌙 *TRADING HOURS*    │
+└─────────────────────────┘
+
+🚫 Gold market is currently closed.
+
+📅 *Trading Hours (UAE Time):*
+Monday - Friday: 06:00 - 05:00
+Weekend: CLOSED
+
+⏰ *Current Time:* ${new Date().toLocaleString("en-US", {
+      timeZone: "Asia/Dubai",
+    })}
+
+🔙 Type *MENU* to return`,
+
+    NETWORK_ERROR: `🌐 *CONNECTION ERROR*
+
+┌─────────────────────────┐
+│   ⚠️ *NETWORK ISSUE*    │
+└─────────────────────────┘
+
+🚫 Unable to connect to trading server.
+
+💡 *Please try:*
+• Checking your internet connection
+• Waiting a moment and trying again
+• Typing *REFRESH* to retry
+
+🔙 Type *MENU* to return`,
+
+    GENERAL: `❌ *ERROR OCCURRED*
+
+┌─────────────────────────┐
+│   🔧 *SYSTEM ERROR*     │
+└─────────────────────────┘
+
+🚫 Something went wrong.
+
+${details ? `📝 *Details:* ${details}` : ""}
+
+💡 *Please try again or contact support*
+
+🔙 Type *MENU* to return`,
+  };
+
+  return errorTemplates[errorType] || errorTemplates["GENERAL"];
+};
+
+// Enhanced Help Message
+const createHelpMessage = async () => {
+  return `┌─────────────────────────┐
+│     📖 *HELP & GUIDE*   │
+└─────────────────────────┘
+
+🚀 *Quick Commands:*
+• *MENU* - Main trading menu
+• *PRICE* - Live gold prices  
+• *BALANCE* - Account balance
+• *POSITIONS* - Open trades
+• *REFRESH* - Update data
+• *RESET* - Restart session
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📱 *How to Trade:*
+
+1️⃣ Check live prices with *PRICE*
+2️⃣ Choose *1* for BUY or *2* for SELL
+3️⃣ Enter your volume in grams
+4️⃣ Confirm with *YES*
+5️⃣ Monitor with *POSITIONS*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🛡️ *Support:*
+📞 *Ajmal TK* - Aurify Technologies
+📱 +971 58 502 3411
+
+🔙 Type *MENU* to start trading`;
+};
+
+// Status indicators
+const STATUS_INDICATORS = {
+  ONLINE: "🟢 ONLINE",
+  OFFLINE: "🔴 OFFLINE",
+  UPDATING: "🟡 UPDATING",
+  ERROR: "❌ ERROR",
+};
+
+// Market status template
+const createMarketStatusMessage = (status, nextOpen = null) => {
+  const statusEmoji = status === "OPEN" ? "🟢" : "🔴";
+  const statusText = status === "OPEN" ? "MARKET OPEN" : "MARKET CLOSED";
+
+  return `${statusEmoji} *${statusText}*
+
+🕒 *Current Time:* ${new Date().toLocaleString("en-US", {
+    timeZone: "Asia/Dubai",
+    dateStyle: "full",
+    timeStyle: "short",
+  })} UAE
+
+${nextOpen ? `⏰ *Next Opening:* ${nextOpen}` : ""}
+
+${status === "OPEN" ? "✅ Trading is available" : "⏸️ Trading is suspended"}`;
+};
+
+// Refresh market data with caching
+const marketDataCache = new Map();
+const MARKET_DATA_TTL = 30000; // 30 seconds
+
+const refreshMarketData = async (clientId) => {
+  const now = Date.now();
+  const cached = marketDataCache.get(clientId);
+  if (cached && now - cached.timestamp < MARKET_DATA_TTL) return;
+
+  try {
+    await mt5MarketDataService.getMarketData("XAUUSD.#", clientId);
+    marketDataCache.set(clientId, { timestamp: now });
+  } catch (error) {
+    console.error(`Market data refresh error: ${error.message}`);
+  }
+};
+
+// Initialize user session
+const initializeUserSession = (from, accountId, profileName) => {
+  const userSession = getUserSession(from);
+  userSession.accountId = accountId;
+  userSession.phoneNumber = from;
+  userSession.tradingMode = "mt5";
+  if (profileName && !userSession.userName) userSession.userName = profileName;
+  return userSession;
+};
+
+// Get current gold price
+const getCurrentGoldPrice = async () => {
+  try {
+    const marketData = await mt5MarketDataService.getMarketData("XAUUSD.#");
+    return marketData?.bid || 0;
+  } catch (error) {
+    console.error(`Gold price error: ${error.message}`);
+    return 0;
+  }
 };
 
 // Main webhook handler with improved error handling and deduplication
@@ -398,8 +832,19 @@ export const handleWhatsAppWebhook = async (req, res) => {
       ProfileName
     );
 
+    // Fetch account details for balance
+    const { userId } = await getUserIdFromPhoneNumber(From);
+    const account = await Account.findById(userId).lean();
+    const goldPrice = await getCurrentGoldPrice();
+
     // Process message and get response
-    const responseMessage = await processMessage(Body, userSession, From);
+    const responseMessage = await processMessage(
+      Body,
+      userSession,
+      From,
+      account,
+      goldPrice
+    );
 
     // Send response only once
     if (responseMessage) {
@@ -410,10 +855,9 @@ export const handleWhatsAppWebhook = async (req, res) => {
     }
   } catch (error) {
     console.error(`Webhook error for ${MessageSid}: ${error.message}`);
-    await sendMessage(From, ERROR_MESSAGE);
+    await sendMessage(From, await createErrorMessage("GENERAL", error.message));
     success = false;
   } finally {
-    // Mark message as completed or failed
     markMessageComplete(
       [processingKeys.primaryKey, processingKeys.fallbackKey],
       success
@@ -421,69 +865,58 @@ export const handleWhatsAppWebhook = async (req, res) => {
   }
 };
 
-// Refresh market data with caching
-const marketDataCache = new Map();
-const MARKET_DATA_TTL = 30000; // 30 seconds
-
-const refreshMarketData = async (clientId) => {
-  const now = Date.now();
-  const cached = marketDataCache.get(clientId);
-  if (cached && now - cached.timestamp < MARKET_DATA_TTL) return;
-
-  try {
-    await mt5MarketDataService.getMarketData("XAUUSD.#", clientId);
-    marketDataCache.set(clientId, { timestamp: now });
-  } catch (error) {
-    console.error(`Market data refresh error: ${error.message}`);
-  }
-};
-
-// Initialize user session
-const initializeUserSession = (from, accountId, profileName) => {
-  const userSession = getUserSession(from);
-  userSession.accountId = accountId;
-  userSession.phoneNumber = from;
-  userSession.tradingMode = "mt5";
-  if (profileName && !userSession.userName) userSession.userName = profileName;
-  return userSession;
-};
-
-// Process incoming message - returns message to send (no automatic sending)
-const processMessage = async (body, userSession, from) => {
+// Process incoming message - returns message to send
+const processMessage = async (body, userSession, from, account, goldPrice) => {
   const trimmedBody = body.trim().toLowerCase();
 
   // Handle special commands first
   const specialCommandResponse = await handleSpecialCommands(
     trimmedBody,
     userSession,
-    from
+    from,
+    account,
+    goldPrice
   );
   if (specialCommandResponse !== null) return specialCommandResponse;
 
   try {
-    // Use existing processUserInputMT5 but ensure it doesn't send messages
     return await processUserInputMT5(body, userSession, null, from, null, from);
   } catch (error) {
     console.error(`Input processing error: ${error.message}`);
     userSession.state = "MAIN_MENU";
-    return `${ERROR_MESSAGE}\n\n${await getMainMenuMT5()}`;
+    return `${await createErrorMessage(
+      "GENERAL",
+      error.message
+    )}\n\n${await getEnhancedMainMenuMT5()}`;
   }
 };
 
 // Handle special commands - returns response message
-const handleSpecialCommands = async (trimmedBody, userSession, from) => {
+const handleSpecialCommands = async (
+  trimmedBody,
+  userSession,
+  from,
+  account,
+  goldPrice
+) => {
   const commands = {
     reset: async () => {
       resetSession(from);
       const newSession = getUserSession(from);
       newSession.tradingMode = "mt5";
-      return await getMainMenuMT5();
+      return await createWelcomeMessage(
+        userSession.userName,
+        account?.AMOUNTFC || 0,
+        account?.reservedAmount || 0,
+        goldPrice
+      );
     },
-    hi: async () => await handleGreeting(userSession),
-    hello: async () => await handleGreeting(userSession),
-    start: async () => await handleGreeting(userSession),
-    balance: async () => await handleBalanceCommand(userSession),
-    5: async () => await handleBalanceCommand(userSession),
+    hi: async () => await handleGreeting(userSession, account, goldPrice),
+    hello: async () => await handleGreeting(userSession, account, goldPrice),
+    start: async () => await handleGreeting(userSession, account, goldPrice),
+    balance: async () =>
+      await handleBalanceCommand(userSession, account, goldPrice),
+    5: async () => await handleBalanceCommand(userSession, account, goldPrice),
     cancel: async () => await handleCancelCommand(userSession),
     price: async () => await getPriceMessageMT5(),
     prices: async () => await getPriceMessageMT5(),
@@ -496,12 +929,11 @@ const handleSpecialCommands = async (trimmedBody, userSession, from) => {
     },
     menu: async () => {
       userSession.state = "MAIN_MENU";
-      return await getMainMenuMT5();
+      return await getEnhancedMainMenuMT5();
     },
     help: async () => {
       userSession.state = "MAIN_MENU";
-      const mainMenu = await getMainMenuMT5();
-      return `📖 *Help & Commands*\n\n📊 *Quick Commands:*\n• PRICE - View live prices\n• BALANCE - Check account balance\n• POSITIONS - View open positions\n• MENU - Return to main menu\n• RESET - Reset session\n\n${mainMenu}`;
+      return await createHelpMessage();
     },
   };
 
@@ -513,39 +945,43 @@ const handleSpecialCommands = async (trimmedBody, userSession, from) => {
       console.error(
         `Error handling command '${trimmedBody}': ${error.message}`
       );
-      return ERROR_MESSAGE;
+      return await createErrorMessage("GENERAL", error.message);
     }
   }
   return null;
 };
 
 // Handle greeting commands
-const handleGreeting = async (userSession) => {
+const handleGreeting = async (userSession, account, goldPrice) => {
   userSession.state = "MAIN_MENU";
   userSession.tradingMode = "mt5";
-  return `Hello ${
-    userSession.userName || "there"
-  }! 👋\n\n${await getMainMenuMT5()}`;
+  return await createWelcomeMessage(
+    userSession.userName,
+    account?.AMOUNTFC || 0,
+    account?.reservedAmount || 0,
+    goldPrice
+  );
 };
 
 // Handle balance command
-const handleBalanceCommand = async (userSession) => {
+const handleBalanceCommand = async (userSession, account, goldPrice) => {
   try {
     const balance = await getUserBalance(
       userSession.accountId,
       userSession.phoneNumber
     );
-    const goldPrice = await getCurrentGoldPrice();
-    const portfolioValue = balance.cash + balance.gold * goldPrice;
-
-    return `💰 *Your Current Balance*\n\n💵 Cash: ${balance.cash.toFixed(
-      2
-    )}\n🥇 Gold: ${balance.gold.toFixed(2)} TTB\n📊 Gold Value: ${(
-      balance.gold * goldPrice
-    ).toFixed(2)}\n💎 Total Portfolio: ${portfolioValue.toFixed(2)}`;
+    return await createBalanceMessage(
+      account?.AMOUNTFC || balance.cash,
+      account?.reservedAmount || balance.cash,
+      goldPrice,
+      balance.gold || 0
+    );
   } catch (error) {
     console.error(`Balance error: ${error.message}`);
-    return "❌ Unable to fetch balance. Please try again.";
+    return await createErrorMessage(
+      "GENERAL",
+      "Unable to fetch balance. Please try again."
+    );
   }
 };
 
@@ -557,20 +993,7 @@ const handleCancelCommand = async (userSession) => {
 
   return `❌ ${
     wasConfirming ? "Order cancelled" : "No active order to cancel"
-  }.\n\n${await getMainMenuMT5()}`;
-};
-
-// Get current gold price
-const getCurrentGoldPrice = async () => {
-  try {
-    const marketData = await mt5MarketDataService.getMarketData(
-      "XAUUSD.#"
-    );
-    return marketData?.bid || 0;
-  } catch (error) {
-    console.error(`Gold price error: ${error.message}`);
-    return 0;
-  }
+  }.\n\n${await getEnhancedMainMenuMT5()}`;
 };
 
 // Health check endpoint
@@ -584,7 +1007,6 @@ export const healthCheck = (req, res) => {
 };
 
 // Updated handlers that return messages instead of sending them directly
-
 export const handleMainMenuMT5 = async (input, session, phoneNumber) => {
   console.log(`handleMainMenuMT5: ${input}, ${session.state}`);
   switch (input.toLowerCase()) {
@@ -601,7 +1023,9 @@ export const handleMainMenuMT5 = async (input, session, phoneNumber) => {
     case "3":
     case "price":
     case "prices":
-      return await getPriceMessageMT5();
+      const marketData = await mt5MarketDataService.getMarketData("XAUUSD.#");
+      const spread = marketData ? (marketData.ask - marketData.bid) * 10 : null;
+      return await createPriceMessage(marketData, spread);
     case "4":
     case "positions":
       return await getPositionsMessageMT5(session, phoneNumber);
@@ -609,7 +1033,7 @@ export const handleMainMenuMT5 = async (input, session, phoneNumber) => {
     case "close":
       return await getPositionsMessageMT5(session, phoneNumber);
     default:
-      return await getMainMenuMT5();
+      return await getEnhancedMainMenuMT5();
   }
 };
 
@@ -621,27 +1045,29 @@ export const handleVolumeInputMT5 = async (input, session, phoneNumber) => {
   if (input.toLowerCase() === "menu") {
     session.state = "MAIN_MENU";
     session.pendingOrder = null;
-    return await getMainMenuMT5();
+    return await getEnhancedMainMenuMT5();
   }
 
   const volume = parseFloat(input);
   if (isNaN(volume) || volume <= 0) {
-    return "❌ Invalid volume. Enter a number (e.g., 0.01) or MENU to cancel.";
+    return await createErrorMessage(
+      "GENERAL",
+      "Invalid volume. Enter a number (e.g., 0.01) or MENU to cancel."
+    );
   }
 
   try {
-    const marketData = await mt5MarketDataService.getMarketData(
-      "XAUUSD.#"
-    );
+    const marketData = await mt5MarketDataService.getMarketData("XAUUSD.#");
     if (!marketData) {
       session.state = "MAIN_MENU";
-      return `⚠️ No market data. Try again.\n\n${await getMainMenuMT5()}`;
+      return `${await createErrorMessage(
+        "NETWORK_ERROR"
+      )}\n\n${await getEnhancedMainMenuMT5()}`;
     }
 
     const price =
       session.pendingOrder.type === "BUY" ? marketData.ask : marketData.bid;
 
-    // Check sufficient balance
     const balanceCheck = await checkSufficientBalance(
       price,
       volume,
@@ -650,7 +1076,10 @@ export const handleVolumeInputMT5 = async (input, session, phoneNumber) => {
     if (!balanceCheck.isSufficient) {
       session.state = "MAIN_MENU";
       session.pendingOrder = null;
-      return `${balanceCheck.errorMessage}\n\n${await getMainMenuMT5()}`;
+      return `${await createErrorMessage(
+        "INSUFFICIENT_BALANCE",
+        balanceCheck.errorMessage
+      )}\n\n${await getEnhancedMainMenuMT5()}`;
     }
 
     const totalCost = volume * price;
@@ -659,17 +1088,20 @@ export const handleVolumeInputMT5 = async (input, session, phoneNumber) => {
     session.pendingOrder.totalCost = totalCost;
     session.state = "CONFIRM_ORDER";
 
-    return `📊 Order Confirmation\n📋 Type: ${
-      session.pendingOrder.type
-    }\n💰 Volume: ${volume} grams\n💵 Price: $${price.toFixed(
-      2
-    )}\n💸 Total: $${totalCost.toFixed(
-      2
-    )}\n📡 Symbol: GOLD\n🔧 Type YES to confirm, NO or MENU to cancel.`;
+    return await createOrderConfirmation(
+      session.pendingOrder.type,
+      volume,
+      price,
+      totalCost,
+      session.pendingOrder.symbol
+    );
   } catch (error) {
     console.error(`Volume error: ${error.message}`);
     session.state = "MAIN_MENU";
-    return `❌ Error processing volume. Try again.\n\n${await getMainMenuMT5()}`;
+    return `${await createErrorMessage(
+      "GENERAL",
+      "Error processing volume. Try again."
+    )}\n\n${await getEnhancedMainMenuMT5()}`;
   }
 };
 
@@ -685,7 +1117,7 @@ export const handleOrderConfirmationMT5 = async (
   if (input.toLowerCase() === "menu" || input.toLowerCase() === "no") {
     session.state = "MAIN_MENU";
     session.pendingOrder = null;
-    return `❌ Order cancelled.\n\n${await getMainMenuMT5()}`;
+    return `❌ Order cancelled.\n\n${await getEnhancedMainMenuMT5()}`;
   }
 
   if (input.toLowerCase() !== "yes") {
@@ -712,9 +1144,7 @@ export const handleOrderConfirmationMT5 = async (
       throw new Error("User account not found");
     }
 
-    const marketData = await mt5MarketDataService.getMarketData(
-      "XAUUSD.#"
-    );
+    const marketData = await mt5MarketDataService.getMarketData("XAUUSD.#");
     if (!marketData || !marketData.ask || !marketData.bid) {
       throw new Error("Failed to fetch live market data");
     }
@@ -784,18 +1214,15 @@ export const handleOrderConfirmationMT5 = async (
       `Trade successfully created and committed for ticket: ${result.ticket}`
     );
 
-    // Construct response message *before* resetting session
-    const responseMessage = `✅ Order Placed!\n📋 Type: ${
-      result.type
-    }\n💰 Volume: ${result.volume} grams\n💵 Price: ${parseFloat(price).toFixed(
-      2
-    )}\n📊 Order ID: ${result.ticket}\n📡 Symbol: ${
-      session.pendingOrder.symbol
-    }\n🕒 ${new Date().toLocaleString("en-US", {
-      timeZone: "Asia/Dubai",
-    })}\n\n${await getMainMenuMT5()}`;
+    const responseMessage = await createOrderSuccessMessage(
+      result,
+      result.type,
+      result.volume,
+      parseFloat(price),
+      session.pendingOrder.symbol,
+      result.ticket
+    );
 
-    // Reset session state *after* constructing response
     session.state = "MAIN_MENU";
     session.pendingOrder = null;
 
@@ -809,16 +1236,13 @@ export const handleOrderConfirmationMT5 = async (
         console.error(`Failed to abort transaction: ${abortError.message}`);
       }
     }
-
     console.error(`Order placement error: ${error.message}`);
-
-    // Reset session state
     session.state = "MAIN_MENU";
     session.pendingOrder = null;
-
-    return `❌ Error placing order: ${
+    return `${await createErrorMessage(
+      "GENERAL",
       error.message
-    }\n\n${await getMainMenuMT5()}`;
+    )}\n\n${await getEnhancedMainMenuMT5()}`;
   } finally {
     try {
       await mongoSession.endSession();
@@ -840,7 +1264,7 @@ export const handlePositionSelectionMT5 = async (
   if (input.toLowerCase() === "menu") {
     session.state = "MAIN_MENU";
     session.openPositions = null;
-    return await getMainMenuMT5();
+    return await getEnhancedMainMenuMT5();
   }
 
   const positionIndex = parseInt(input) - 1;
@@ -849,7 +1273,10 @@ export const handlePositionSelectionMT5 = async (
     positionIndex < 0 ||
     positionIndex >= session.openPositions.length
   ) {
-    return "❌ Invalid position number. Select a valid number or type MENU.";
+    return await createErrorMessage(
+      "GENERAL",
+      "Invalid position number. Select a valid number or type MENU."
+    );
   }
 
   const selectedPosition = session.openPositions[positionIndex];
@@ -863,7 +1290,10 @@ export const handlePositionSelectionMT5 = async (
     console.error(
       `Invalid volume for ticket ${selectedPosition.ticket}: ${selectedPosition.volume}`
     );
-    return "❌ Invalid volume for the selected position.";
+    return await createErrorMessage(
+      "GENERAL",
+      "Invalid volume for the selected position."
+    );
   }
 
   const mongoSession = await mongoose.startSession();
@@ -887,7 +1317,6 @@ export const handlePositionSelectionMT5 = async (
     })
       .session(mongoSession)
       .lean();
-
     console.log("Order found:", JSON.stringify(order, null, 2));
 
     if (!order) {
@@ -900,7 +1329,6 @@ export const handlePositionSelectionMT5 = async (
       throw new Error(`Order ${selectedPosition.ticket} is already closed`);
     }
 
-    // Update trade status (includes MT5 closure)
     const updateData = { orderStatus: "CLOSED" };
     const updatedOrder = await updateTradeStatus(
       adminId,
@@ -908,10 +1336,8 @@ export const handlePositionSelectionMT5 = async (
       updateData,
       mongoSession
     );
-
     console.log(`Updated order: ${JSON.stringify(updatedOrder, null, 2)}`);
 
-    // Commit the transaction
     await mongoSession.commitTransaction();
     transactionCommitted = true;
 
@@ -919,21 +1345,24 @@ export const handlePositionSelectionMT5 = async (
       `Position successfully closed and committed for ticket: ${selectedPosition.ticket}`
     );
 
-    // Reset session state
     session.state = "MAIN_MENU";
     session.openPositions = null;
 
-    return `✅ Position Closed Successfully!\n📊 Ticket: ${
-      selectedPosition.ticket
-    }\n💰 Close Price: ${updatedOrder.order.closingPrice.toFixed(
-      2
-    )}\n📈 P&L: ${updatedOrder.order.profit.toFixed(
-      2
-    )}\n🕒 ${new Date().toLocaleString("en-US", {
-      timeZone: "Asia/Dubai",
-    })}\n\n${await getMainMenuMT5()}`;
+    return `✅ Position Closed Successfully!
+┌─────────────────────────┐
+│    🎉 *CLOSURE SUCCESS* │
+└─────────────────────────┘
+
+🎫 *Ticket:* #${selectedPosition.ticket}
+💰 *Close Price:* $${updatedOrder.order.closingPrice.toFixed(2)}
+📈 *P&L:* $${updatedOrder.order.profit.toFixed(2)}
+🕒 *Closed:* ${new Date().toLocaleString("en-US", { timeZone: "Asia/Dubai" })}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 *What's next?*
+• Type *4* to view positions
+• Type *MENU* to return`;
   } catch (error) {
-    // Only abort if transaction was started but not committed
     if (transactionStarted && !transactionCommitted) {
       try {
         await mongoSession.abortTransaction();
@@ -942,28 +1371,29 @@ export const handlePositionSelectionMT5 = async (
         console.error(`Failed to abort transaction: ${abortError.message}`);
       }
     }
-
     console.error(
       `Position close error for ticket ${
         selectedPosition?.ticket || "unknown"
       }: ${error.message}`
     );
-
-    // Reset session state
     session.state = "MAIN_MENU";
     session.openPositions = null;
 
-    let errorMessage = `❌ Error Closing Position\n📊 Ticket: ${
-      selectedPosition?.ticket || "unknown"
-    }\n📝 Error: ${error.message}\n\n${await getMainMenuMT5()}`;
-
-    if (error.message.includes("Position not found")) {
-      errorMessage = `❌ Position ${
+    let errorMessage = await createErrorMessage(
+      "GENERAL",
+      `Error Closing Position\n📊 Ticket: ${
         selectedPosition?.ticket || "unknown"
-      } not found in MT5. It may already be closed.\n\n${await getMainMenuMT5()}`;
+      }\n📝 Error: ${error.message}`
+    );
+    if (error.message.includes("Position not found")) {
+      errorMessage = await createErrorMessage(
+        "GENERAL",
+        `Position ${
+          selectedPosition?.ticket || "unknown"
+        } not found in MT5. It may already be closed.`
+      );
     }
-
-    return errorMessage;
+    return `${errorMessage}\n\n${await getEnhancedMainMenuMT5()}`;
   } finally {
     try {
       await mongoSession.endSession();
