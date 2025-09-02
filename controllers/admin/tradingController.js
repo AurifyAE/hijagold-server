@@ -79,17 +79,16 @@ export const createTrade = async (req, res, next) => {
       requiredMargin,
       comment,
       stopLoss,
-      takeProfit
+      takeProfit,
     } = req.body;
 
     console.log(`Received trade request: ${JSON.stringify(req.body, null, 2)}`);
+
     // Validate trade data
     const validationError = validateTradeData(req.body);
     if (validationError) {
       throw new Error(`Validation failed: ${validationError}`);
     }
-
-    // console.log(`Received trade request: ${JSON.stringify(req.body, null, 2)}`);
 
     // Fetch user's phone number for WhatsApp messaging
     const account = await Account.findOne({ _id: userId });
@@ -103,7 +102,14 @@ export const createTrade = async (req, res, next) => {
         ""
       )}`;
     }
-    // console.log(`User phone number: ${phoneNumber}`);
+    console.log(`User phone number: ${phoneNumber}`);
+
+    // Validate phone number format
+    const phoneRegex = /^whatsapp:\+\d{10,15}$/;
+    if (!phoneRegex.test(phoneNumber)) {
+      console.warn(`Invalid phone number format: ${phoneNumber}, using fallback`);
+      phoneNumber = "whatsapp:+918138823410"; // Fallback number
+    }
 
     // Pass trade data to service layer
     const tradeResult = await tradingServices.createTrade(adminId, userId, {
@@ -163,7 +169,7 @@ export const createTrade = async (req, res, next) => {
       },
     });
   } catch (error) {
-    console.error(`Error creating trade: ${error.message}`);
+    console.error(`Error creating trade: ${error.message}, Stack: ${error.stack}`);
 
     // Send WhatsApp error message
     const errorMessage = `❌ Order Failed!\n\nError: ${
@@ -173,7 +179,7 @@ export const createTrade = async (req, res, next) => {
       await client.messages.create({
         body: errorMessage,
         from: twilioPhoneNumber,
-        to: phoneNumber || "whatsapp:+918138823410", // Fallback phone number
+        to: phoneNumber || "whatsapp:+918138823410", // Use validated phone number or fallback
       });
       console.log(
         `WhatsApp error message sent to ${

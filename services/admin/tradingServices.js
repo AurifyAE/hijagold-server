@@ -222,15 +222,16 @@ export const createTrade = async (
 
    
     // Validate and place MT5 trade
+    const accountKey = "5003"
    const mt5Symbol = SYMBOL_MAPPING[tradeData.symbol];
   if (!mt5Symbol) {
     throw new Error(`Invalid symbol: ${tradeData.symbol}. No MT5 mapping found.`);
   }
 
-  const validatedSymbol = await mt5Service.validateSymbol(mt5Symbol);
+  const validatedSymbol = await mt5Service.validateSymbol(accountKey,mt5Symbol);
   console.log(`Validated MT5 Symbol: ${validatedSymbol}`);
 
-  const priceData = await mt5Service.getPrice(validatedSymbol);
+  const priceData = await mt5Service.getPrice(accountKey,validatedSymbol);
   console.log(`Market Price for ${validatedSymbol}: ${JSON.stringify(priceData)}`);
   if (!priceData || !priceData.bid || !priceData.ask) {
     throw new Error(`No valid price quote available for ${validatedSymbol}`);
@@ -244,12 +245,14 @@ export const createTrade = async (
     tpDistance: null,
     comment: tradeData.comment,
     magic: 123456,
+    deviation: 20,
+    filling_mode: "IOC"
   };
   console.log(
     `MT5 Trade Parameters: ${JSON.stringify(mt5TradeData, null, 2)}`
   );
 
-    const mt5Result = await mt5Service.placeTrade(mt5TradeData);
+    const mt5Result = await mt5Service.placeTrade(accountKey,mt5TradeData);
     console.log(`MT5 trade placed successfully: Order ID ${mt5Result.ticket}`);
 
     if (!mt5Result.success) {

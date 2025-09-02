@@ -8,10 +8,12 @@ from datetime import datetime
 import logging
 from queue import Queue
 import asyncio
+import uuid
+import concurrent.futures
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout)
@@ -21,46 +23,62 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'aurify@123'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', engineio_logger=False)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', engineio_logger=False, max_http_buffer_size=10**7)
 
 class MT5Connector:
-    def __init__(self):
+    def __init__(self, account_id):
+        self.account_id = account_id
         self.connected = False
         self.active_subscriptions = {}
         self.price_threads = {}
         self.symbol_data = {}
         self.mt5_lock = threading.Lock()
-        self.data_queue = Queue()
-        self.batch_interval = 0.1
         self.shutdown_event = threading.Event()
+        self.last_activity = time.time()
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
-    def connect(self, server, login, password):
+    def update_activity(self):
+        self.last_activity = time.time()
+
+    def connect(self, server, login, password, terminal_path=None):
+        self.update_activity()
         try:
             with self.mt5_lock:
-                if not mt5.initialize():
-                    logger.error("MT5 initialization failed")
-                    return False, {"code": 1000, "message": "MT5 initialization failed"}
+                if terminal_path:
+                    if not mt5.initialize(path=terminal_path):
+                        logger.error(f"MT5 initialization failed for account {self.account_id}")
+                        return False, {"code": 1000, "message": "MT5 initialization failed"}
+                else:
+                    if not mt5.initialize():
+                        logger.error(f"MT5 initialization failed for account {self.account_id}")
+                        return False, {"code": 1000, "message": "MT5 initialization failed"}
                 
                 authorized = mt5.login(login, password=password, server=server)
                 if not authorized:
                     error = mt5.last_error()
-                    logger.error(f"Login failed: {error}")
+                    logger.error(f"Login failed for account {self.account_id}: {error}")
                     return False, {"code": error[0], "message": f"Login failed: {error[1]}"}
                 
                 self.connected = True
                 self.shutdown_event.clear()
                 account_info = mt5.account_info()
                 if account_info and not account_info.trade_expert:
-                    logger.warning("AutoTrading disabled")
+                    logger.warning(f"AutoTrading disabled for account {self.account_id}")
                     return False, {"code": 1001, "message": "AutoTrading disabled. Enable 'Algo Trading' in MT5"}
                 
                 logger.info(f"Connected to MT5, account: {account_info.login if account_info else None}")
-                return True, {"message": "Connected", "account": account_info.login if account_info else None}
+                return True, {
+                    "message": "Connected",
+                    "account": account_info.login if account_info else None,
+                    "trade_allowed": account_info.trade_allowed if account_info else False,
+                    "balance": account_info.balance if account_info else 0
+                }
         except Exception as e:
-            logger.exception(f"Connection error: {str(e)}")
+            logger.exception(f"Connection error for account {self.account_id}: {str(e)}")
             return False, {"code": 1002, "message": str(e)}
 
     def disconnect(self):
+        self.update_activity()
         try:
             with self.mt5_lock:
                 self.connected = False
@@ -69,46 +87,42 @@ class MT5Connector:
                 for symbol in list(self.price_threads.keys()):
                     self.stop_price_stream(symbol)
                 
-                for thread in list(self.price_threads.values()):
-                    if thread.is_alive():
-                        thread.join(timeout=2)
-                
                 self.active_subscriptions.clear()
                 self.price_threads.clear()
+                self.executor.shutdown(wait=True)
                 mt5.shutdown()
-                logger.info("Disconnected from MT5")
+                logger.info(f"Disconnected from MT5 for account {self.account_id}")
                 return True, {"message": "Disconnected"}
         except Exception as e:
-            logger.exception(f"Disconnect error: {str(e)}")
+            logger.exception(f"Disconnect error for account {self.account_id}: {str(e)}")
             return False, {"code": 1003, "message": str(e)}
 
     def get_symbols(self):
+        self.update_activity()
         try:
             if not self.connected:
-                logger.warning("Attempted to get symbols while not connected")
                 return False, {"code": 1004, "message": "Not connected"}
             
             with self.mt5_lock:
                 symbols = mt5.symbols_get() or []
                 return True, [symbol.name for symbol in symbols]
         except Exception as e:
-            logger.exception(f"Error getting symbols: {str(e)}")
+            logger.exception(f"Error getting symbols for account {self.account_id}: {str(e)}")
             return False, {"code": 1005, "message": str(e)}
 
     def get_symbol_info(self, symbol):
+        self.update_activity()
         try:
             if not self.connected:
-                logger.warning(f"Attempted to get symbol info for {symbol} while not connected")
                 return False, {"code": 1004, "message": "Not connected"}
             
             with self.mt5_lock:
                 if not mt5.symbol_select(symbol, True):
-                    logger.error(f"Symbol {symbol} not selected")
-                    return False, {"code": 1006, "message": f"Symbol {symbol} not selected"}
+                    last_err = mt5.last_error()
+                    return False, {"code": 1006, "message": f"Symbol {symbol} not selected. Last error: {last_err}"}
                 
                 info = mt5.symbol_info(symbol)
                 if not info:
-                    logger.error(f"Symbol {symbol} not found")
                     return False, {"code": 1007, "message": f"Symbol {symbol} not found"}
                 
                 stops_level = getattr(info, 'stops_level', 0)
@@ -125,27 +139,25 @@ class MT5Connector:
                     "filling_mode": info.filling_mode
                 }
         except Exception as e:
-            logger.exception(f"Error getting symbol info for {symbol}: {str(e)}")
+            logger.exception(f"Error getting symbol info for {symbol} for account {self.account_id}: {str(e)}")
             return False, {"code": 1008, "message": str(e)}
 
     def get_price(self, symbol):
+        self.update_activity()
         try:
             if not self.connected:
-                logger.warning(f"Attempted to get price for {symbol} while not connected")
                 return False, {"code": 1004, "message": "Not connected"}
             
             with self.mt5_lock:
                 if not mt5.symbol_select(symbol, True):
-                    logger.error(f"Symbol {symbol} not selected")
-                    return False, {"code": 1006, "message": f"Symbol {symbol} not selected"}
+                    last_err = mt5.last_error()
+                    return False, {"code": 1006, "message": f"Symbol {symbol} not selected. Last error: {last_err}"}
                 
-                time.sleep(0.05)
                 tick = mt5.symbol_info_tick(symbol)
                 
                 if not tick:
                     rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 1)
                     if not rates or not len(rates):
-                        logger.error(f"No price data for {symbol}")
                         return False, {"code": 1009, "message": f"No price data for {symbol}"}
                     
                     rate = rates[0]
@@ -164,16 +176,13 @@ class MT5Connector:
                 symbol_info = mt5.symbol_info(symbol)
                 spread = (tick.ask - tick.bid) / symbol_info.point if symbol_info and symbol_info.point > 0 else 0
                 
-                current_data = self.symbol_data.get(symbol, {"high": None, "low": None, "last_close": None, "last_timestamp": None})
-                current_high = current_data["high"] or tick.bid
-                current_low = current_data["low"] or tick.bid
-                current_high = max(current_high, tick.bid, tick.ask)
-                current_low = min(current_low, tick.bid, tick.ask)
+                current_data = self.symbol_data.get(symbol, {"high": None, "low": None})
+                current_high = max(current_data["high"] or tick.bid, tick.bid, tick.ask)
+                current_low = min(current_data["low"] or tick.bid, tick.bid, tick.ask)
                 
                 self.symbol_data[symbol] = {
                     "high": current_high,
                     "low": current_low,
-                    "last_close": tick.bid if symbol_info and symbol_info.trade_mode == 0 else current_data.get("last_close"),
                     "last_timestamp": datetime.fromtimestamp(tick.time).isoformat()
                 }
                 
@@ -186,13 +195,15 @@ class MT5Connector:
                     "timestamp": time.time(),
                     "high": current_high,
                     "low": current_low,
-                    "marketStatus": "TRADEABLE" if symbol_info and symbol_info.trade_mode != 0 else "CLOSED"
+                    "marketStatus": "TRADEABLE" if symbol_info and symbol_info.trade_mode != 0 else "CLOSED",
+                    "accountId": self.account_id
                 }
         except Exception as e:
-            logger.exception(f"Error getting price for {symbol}: {str(e)}")
+            logger.exception(f"Error getting price for {symbol} for account {self.account_id}: {str(e)}")
             return False, {"code": 1010, "message": str(e)}
 
     def start_price_stream(self, symbol, client_id):
+        self.update_activity()
         if symbol in self.price_threads:
             if client_id not in self.active_subscriptions.get(symbol, []):
                 self.active_subscriptions.setdefault(symbol, []).append(client_id)
@@ -204,6 +215,7 @@ class MT5Connector:
             last_price = None
             error_count = 0
             max_errors = 5
+            batch_interval = 0.05
             
             while symbol in self.price_threads and self.connected and not self.shutdown_event.is_set():
                 try:
@@ -211,35 +223,31 @@ class MT5Connector:
                     if success:
                         current_price = f"{price_data['bid']}-{price_data['ask']}"
                         if current_price != last_price:
-                            socketio.emit('market-data', price_data, room=f'symbol_{symbol}')
+                            socketio.emit('market-data', price_data, room=f'account_{self.account_id}_symbol_{symbol}', namespace='/')
                             last_price = current_price
                             error_count = 0
                     else:
                         error_count += 1
-                        logger.error(f"Failed to get price for {symbol}: {price_data.get('message', 'Unknown error')}")
                         if error_count >= max_errors:
-                            logger.error(f"Too many errors for {symbol}, stopping stream")
                             break
                     
-                    time.sleep(self.batch_interval)
+                    time.sleep(batch_interval)
                 except Exception as e:
                     error_count += 1
-                    logger.exception(f"Error streaming {symbol}: {str(e)}")
                     if error_count >= max_errors:
-                        logger.error(f"Too many errors for {symbol}, stopping stream")
                         break
+            
             if symbol in self.price_threads:
                 del self.price_threads[symbol]
             if symbol in self.active_subscriptions:
                 del self.active_subscriptions[symbol]
-            logger.info(f"Price stream ended for {symbol}")
         
-        thread = threading.Thread(target=price_worker, daemon=True, name=f"PriceStream-{symbol}")
-        self.price_threads[symbol] = thread
-        thread.start()
-        logger.info(f"Started price stream for {symbol} with client {client_id}")
+        future = self.executor.submit(price_worker)
+        self.price_threads[symbol] = future
+        logger.info(f"Started price stream for {symbol} with client {client_id} for account {self.account_id}")
 
     def stop_price_stream(self, symbol, client_id=None):
+        self.update_activity()
         try:
             if symbol not in self.active_subscriptions:
                 return
@@ -250,174 +258,257 @@ class MT5Connector:
                     del self.active_subscriptions[symbol]
                     if symbol in self.price_threads:
                         del self.price_threads[symbol]
-                    logger.info(f"Stopped price stream for {symbol} (client {client_id})")
             else:
                 if symbol in self.active_subscriptions:
                     del self.active_subscriptions[symbol]
                 if symbol in self.price_threads:
                     del self.price_threads[symbol]
-                logger.info(f"Stopped price stream for {symbol} (all clients)")
         except Exception as e:
-            logger.exception(f"Error stopping price stream for {symbol}: {str(e)}")
+            logger.exception(f"Error stopping price stream for {symbol} for account {self.account_id}: {str(e)}")
 
-    def place_trade(self, symbol, volume, order_type, sl_distance=None, tp_distance=None, comment="", magic=0):
+    def place_trade(self, symbol, volume, order_type, sl_distance=None, tp_distance=None, comment="", magic=0, filling_mode="IOC"):
+        self.update_activity()
         try:
             if not self.connected:
-                return False, "Not connected"
+                return False, {"code": 1004, "message": "Not connected"}
+        
             with self.mt5_lock:
+                # Validate symbol
                 if not mt5.symbol_select(symbol, True):
-                    return False, f"Symbol {symbol} not selected"
+                    last_err = mt5.last_error()
+                    logger.error(f"Symbol {symbol} selection failed for account {self.account_id}: {last_err}")
+                    return False, {"code": 1006, "message": f"Symbol {symbol} not selected. Last error: {last_err}"}
+            
                 info = mt5.symbol_info(symbol)
-                if not info:
-                    return False, f"Symbol {symbol} not found"
-                if info.trade_mode == 0:
-                    return False, f"Symbol {symbol} not tradable"
-                stop_level = getattr(info, 'stops_level', 0) * info.point
+                if not info or info.trade_mode == 0:
+                    logger.error(f"Symbol {symbol} not found or not tradable for account {self.account_id}")
+                    return False, {"code": 1007, "message": f"Symbol {symbol} not found or not tradable"}
+            
+                # Validate account
+                account_info = mt5.account_info()
+                if not account_info:
+                    logger.error(f"Failed to retrieve account info for account {self.account_id}")
+                    return False, {"code": 1011, "message": "Failed to retrieve account info"}
+                if not account_info.trade_allowed:
+                    logger.error(f"AutoTrading disabled for account {self.account_id}")
+                    return False, {"code": 10027, "message": "AutoTrading disabled"}
+                if account_info.balance < volume * 100:  # Rough margin check
+                    logger.error(f"Insufficient balance for trade: {account_info.balance} < {volume * 100}")
+                    return False, {"code": 10019, "message": "Insufficient funds"}
+
+                # Get current price
                 tick = mt5.symbol_info_tick(symbol)
                 if not tick:
-                    return False, f"No price for {symbol}"
+                    logger.error(f"No price data for {symbol} for account {self.account_id}")
+                    return False, {"code": 1009, "message": f"No price for {symbol}"}
+            
+                # Set order type and price
                 order_type = order_type.upper()
                 if order_type == "BUY":
                     mt5_type = mt5.ORDER_TYPE_BUY
                     price = tick.ask
-                    sl = round(price - sl_distance, info.digits) if sl_distance and sl_distance > 0 else 0
-                    tp = round(price + tp_distance, info.digits) if tp_distance and tp_distance > 0 else 0
+                    sl = round(price - sl_distance, info.digits) if sl_distance else 0
+                    tp = round(price + tp_distance, info.digits) if tp_distance else 0
                 elif order_type == "SELL":
                     mt5_type = mt5.ORDER_TYPE_SELL
                     price = tick.bid
-                    sl = round(price + sl_distance, info.digits) if sl_distance and sl_distance > 0 else 0
-                    tp = round(price - tp_distance, info.digits) if tp_distance and tp_distance > 0 else 0
+                    sl = round(price + sl_distance, info.digits) if sl_distance else 0
+                    tp = round(price - tp_distance, info.digits) if tp_distance else 0
                 else:
-                    return False, f"Invalid order type {order_type}"
+                    logger.error(f"Invalid order type {order_type} for account {self.account_id}")
+                    return False, {"code": 10017, "message": f"Invalid order type {order_type}"}
+            
+                # Validate volume
                 volume = max(info.volume_min, min(info.volume_max, round(volume / info.volume_step) * info.volume_step))
 
-                # Determine the appropriate filling type
-                filling_mode = info.filling_mode
-                supported_fillings = []
-                if filling_mode & 1:  # FOK
-                    supported_fillings.append(mt5.ORDER_FILLING_FOK)
-                if filling_mode & 2:  # IOC
-                    supported_fillings.append(mt5.ORDER_FILLING_IOC)
-                if filling_mode & 4:  # RETURN
-                    supported_fillings.append(mt5.ORDER_FILLING_RETURN)
-
-                if not supported_fillings:
-                    logger.error(f"No supported filling modes for {symbol}")
-                    return False, f"No supported filling modes for {symbol}"
-
-                # Prefer FOK, then IOC, then RETURN
-                filling_type = supported_fillings[0]  # Take the first supported filling mode
-                logger.info("Selected filling type: {filling_type} for symbol {symbol}")
-
-                request = {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": symbol,
-                    "volume": volume,
-                    "type": mt5_type,
-                    "price": price,
-                    "deviation": 20,
-                    "magic": magic,
-                    "comment": comment,
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": filling_type
-                }
-                if sl_distance and sl_distance > 0 and sl != 0:
-                    if sl_distance < stop_level:
-                        sl_distance = stop_level
-                        sl = round(price - sl_distance if order_type == "BUY" else price + sl_distance, info.digits)
-                    request["sl"] = sl
-                if tp_distance and tp_distance > 0 and tp != 0:
-                    if tp_distance < stop_level:
-                        tp_distance = stop_level
-                        tp = round(price + tp_distance if order_type == "BUY" else price - tp_distance, info.digits)
-                    request["tp"] = tp
-                result = mt5.order_send(request)
-                if result is None:
-                    error = mt5.last_error()
-                    error_code = error[0] if isinstance(error, tuple) else getattr(error, 'code', -1)
-                    error_comment = error[1] if isinstance(error, tuple) else getattr(error, 'comment', 'Unknown error')
-                    if error_code == 10013:  # Requote, try with higher deviation
-                        request["deviation"] = 50
-                        result = mt5.order_send(request)
-                        if result is None:
-                            error = mt5.last_error()
-                            error_code = error[0] if isinstance(error, tuple) else getattr(error, 'code', -1)
-                            error_comment = error[1] if isinstance(error, tuple) else getattr(error, 'comment', 'Unknown error')
-                            return False, f"Order failed: Code: {error_code} - {error_comment}"
-                    else:
-                        return False, f"Order failed: Code: {error_code} - {error_comment}"
-                if result.retcode == mt5.TRADE_RETCODE_DONE:
-                    return True, {
-                        "order": result.order,
-                        "deal": result.deal,
-                        "volume": result.volume,
-                        "price": result.price,
-                        "sl": sl,
-                        "tp": tp,
+                # Log MT5 constants and filling mode
+                logger.info(f"MT5 Constants for account {self.account_id} - FOK: {mt5.ORDER_FILLING_FOK}, IOC: {mt5.ORDER_FILLING_IOC}, RETURN: {mt5.ORDER_FILLING_RETURN}")
+                logger.info(f"Symbol {symbol} filling_mode bitmask: {info.filling_mode}")
+            
+                # Define filling modes with verified MT5 constants
+                filling_modes = [
+                    (mt5.ORDER_FILLING_IOC, "IOC", "Immediate or Cancel"),
+                    (mt5.ORDER_FILLING_FOK, "FOK", "Fill or Kill"),
+                    (mt5.ORDER_FILLING_RETURN, "RETURN", "Market execution")
+                ]
+            
+                # Use the provided filling mode if valid, otherwise try supported modes
+                supported_modes = [(mt5.ORDER_FILLING_IOC, "IOC", "Immediate or Cancel")]  # Default to IOC
+                for mode_constant, mode_name, description in filling_modes:
+                    if info.filling_mode & mode_constant:
+                        supported_modes.append((mode_constant, mode_name, description))
+                        logger.info(f"Symbol {symbol} supports filling mode: {mode_name} ({mode_constant}) - {description}")
+            
+                # Ensure the requested filling mode is supported
+                requested_mode = None
+                for mode_constant, mode_name, description in filling_modes:
+                    if mode_name == filling_mode and (info.filling_mode & mode_constant or mode_name == "IOC"):
+                        requested_mode = (mode_constant, mode_name, description)
+                        break
+                
+                if requested_mode:
+                    supported_modes.insert(0, requested_mode)  # Prioritize requested mode
+                else:
+                    logger.warning(f"Requested filling mode {filling_mode} not supported for {symbol}. Using default IOC.")
+                
+                # Remove duplicates while preserving order
+                seen = set()
+                supported_modes = [mode for mode in supported_modes if not (mode[1] in seen or seen.add(mode[1]))]
+            
+                # Try each supported filling mode
+                last_error = None
+                for mode_constant, mode_name, description in supported_modes:
+                    request = {
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "symbol": symbol,
+                        "volume": volume,
+                        "type": mt5_type,
+                        "price": price,
+                        "deviation": 20,
+                        "magic": magic,
                         "comment": comment,
-                        "retcode": result.retcode
+                        "type_time": mt5.ORDER_TIME_GTC,
+                        "type_filling": mode_constant
                     }
-                error_codes = {
-                    10018: "Market closed",
-                    10019: "Insufficient funds",
-                    10020: "Prices changed",
-                    10021: "Invalid request (check volume, symbol, or market status)",
-                    10022: "Invalid SL/TP",
-                    10017: "Invalid parameters",
-                    10027: "AutoTrading disabled",
-                    10030: "Invalid order filling type"
-                }
-                error_msg = error_codes.get(result.retcode, f"Error {result.retcode}")
-                return False, f"Order failed: {error_msg}"
+                
+                    if sl_distance and sl > 0:
+                        request["sl"] = sl
+                    if tp_distance and tp > 0:
+                        request["tp"] = tp
+                
+                    logger.info(f"Attempting trade with {mode_name} filling mode (constant={mode_constant}) for {symbol} on account {self.account_id}")
+                    logger.debug(f"Full trade request: {request}")
+                
+                    result = mt5.order_send(request)
+                    logger.info(f"MT5 result for {mode_name}: retcode={result.retcode}, comment='{result.comment}', request_id={result.request_id}")
+                
+                    if result.retcode == mt5.TRADE_RETCODE_DONE:
+                        logger.info(f"✅ Trade successful with {mode_name} filling mode for account {self.account_id}")
+                        return True, {
+                            "order": result.order,
+                            "deal": result.deal,
+                            "volume": result.volume,
+                            "price": result.price,
+                            "sl": sl,
+                            "tp": tp,
+                            "comment": comment,
+                            "retcode": result.retcode,
+                            "filling_mode_used": mode_name,
+                            "filling_mode_constant": mode_constant
+                        }
+                    else:
+                        error_messages = {
+                            mt5.TRADE_RETCODE_REQUOTE: "Requote detected",
+                            mt5.TRADE_RETCODE_REJECT: "Order rejected by server",
+                            mt5.TRADE_RETCODE_INVALID: "Invalid request parameters",
+                            mt5.TRADE_RETCODE_INVALID_FILL: "Invalid filling type",
+                            mt5.TRADE_RETCODE_INVALID_VOLUME: "Invalid volume",
+                            mt5.TRADE_RETCODE_NO_MONEY: "Insufficient funds",
+                            mt5.TRADE_RETCODE_TRADE_DISABLED: "Trading disabled",
+                            mt5.TRADE_RETCODE_MARKET_CLOSED: "Market closed",
+                            mt5.TRADE_RETCODE_INVALID_PRICE: "Invalid price",
+                            mt5.TRADE_RETCODE_INVALID_STOPS: "Invalid stops",
+                            mt5.TRADE_RETCODE_INVALID_EXPIRATION: "Invalid expiration",
+                            mt5.TRADE_RETCODE_CONNECTION: "No connection to trade server",
+                            mt5.TRADE_RETCODE_ONLY_REAL: "Only real accounts allowed",
+                            mt5.TRADE_RETCODE_LIMIT_ORDERS: "Order limit reached",
+                            mt5.TRADE_RETCODE_LIMIT_VOLUME: "Volume limit reached",
+                            mt5.TRADE_RETCODE_INVALID_ORDER: "Invalid order",
+                            mt5.TRADE_RETCODE_POSITION_CLOSED: "Position already closed",
+                            mt5.TRADE_RETCODE_INVALID_CLOSE_VOLUME: "Invalid close volume",
+                            mt5.TRADE_RETCODE_CLOSE_ORDER_EXIST: "Close order already exists",
+                            mt5.TRADE_RETCODE_LIMIT_POSITIONS: "Position limit reached",
+                            mt5.TRADE_RETCODE_REJECT_CANCEL: "Request canceled",
+                            mt5.TRADE_RETCODE_LONG_ONLY: "Only long positions allowed",
+                            mt5.TRADE_RETCODE_SHORT_ONLY: "Only short positions allowed",
+                            mt5.TRADE_RETCODE_CLOSE_ONLY: "Only position closing allowed",
+                            mt5.TRADE_RETCODE_FIFO_CLOSE: "FIFO rule violation"
+                        }
+                    
+                        error_msg = error_messages.get(result.retcode, f"Unknown error code: {result.retcode}")
+                        last_error = {
+                            "code": result.retcode,
+                            "message": f"{error_msg} (tried {mode_name})",
+                            "mt5_comment": result.comment,
+                            "filling_mode_tried": mode_name,
+                            "filling_mode_constant": mode_constant
+                        }
+                    
+                        logger.warning(f"❌ Trade failed with {mode_name} (constant={mode_constant}): {error_msg} for account {self.account_id}")
+                        logger.warning(f"MT5 comment: '{result.comment}'")
+                    
+                        if result.retcode in [
+                            mt5.TRADE_RETCODE_NO_MONEY,
+                            mt5.TRADE_RETCODE_TRADE_DISABLED,
+                            mt5.TRADE_RETCODE_MARKET_CLOSED,
+                            mt5.TRADE_RETCODE_INVALID_VOLUME,
+                            mt5.TRADE_RETCODE_CONNECTION,
+                            mt5.TRADE_RETCODE_ONLY_REAL
+                        ]:
+                            logger.error(f"Terminal error {result.retcode}, stopping attempts for account {self.account_id}")
+                            break
+                
+                if last_error:
+                    logger.error(f"All filling modes failed for {symbol}. Last error: {last_error} for account {self.account_id}")
+                    return False, last_error
+                else:
+                    logger.error(f"All filling modes failed for {symbol} for account {self.account_id}")
+                    return False, {"code": 10030, "message": f"All filling modes failed for {symbol}"}
+                
         except Exception as e:
-            logger.exception(f"Error placing trade: {str(e)}")
-            return False, str(e)
+            logger.exception(f"Exception in place_trade for {symbol} account {self.account_id}: {str(e)}")
+            return False, {"code": 1012, "message": f"Trade placement error: {str(e)}"}
 
-    def close_trade(self, ticket, volume=None, symbol=None, max_retries=3):
+    def close_trade(self, ticket, volume=None, symbol=None):
+        self.update_activity()
         try:
             if not self.connected:
-                return False, "Not connected"
+                return False, {"code": 1004, "message": "Not connected"}
+            
             with self.mt5_lock:
                 position = mt5.positions_get(ticket=ticket)
                 if not position:
-                    return False, f"Position {ticket} not found"
+                    return False, {"code": 1013, "message": f"Position {ticket} not found"}
+                
                 pos = position[0]
                 symbol = symbol or pos.symbol
-                position_type = "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL"
                 close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-                if volume is None:
-                    volume = pos.volume
-                else:
-                    volume = min(volume, pos.volume)
-                if not mt5.symbol_select(symbol, True):
-                    return False, f"Symbol {symbol} not selected"
+                volume = volume or pos.volume
+                
                 info = mt5.symbol_info(symbol)
-                if not info:
-                    return False, f"Symbol {symbol} not found"
-                if info.trade_mode == 0:
-                    return False, f"Symbol {symbol} not tradable"
+                if not info or info.trade_mode == 0:
+                    return False, {"code": 1007, "message": f"Symbol {symbol} not tradable"}
+                
                 volume = max(info.volume_min, min(info.volume_max, round(volume / info.volume_step) * info.volume_step))
-                if volume < info.volume_min:
-                    return False, f"Volume {volume} below minimum {info.volume_min}"
-                if volume > info.volume_max:
-                    return False, f"Volume {volume} exceeds maximum {info.volume_max}"
+                
+                # Get current tick
+                tick = mt5.symbol_info_tick(symbol)
+                if not tick:
+                    return False, {"code": 1009, "message": f"No price for {symbol}"}
+                
+                price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+                
                 filling_mode = info.filling_mode
-                supported_fillings = []
-                if filling_mode & 1:
-                    supported_fillings.append(mt5.ORDER_FILLING_FOK)
-                if filling_mode & 2:
-                    supported_fillings.append(mt5.ORDER_FILLING_IOC)
-                if filling_mode & 4:
-                    supported_fillings.append(mt5.ORDER_FILLING_RETURN)
-                if not supported_fillings:
-                    logger.error(f"No supported filling modes for {symbol}")
-                    return False, f"No supported filling modes for {symbol}"
-                filling_type = supported_fillings[0]  # First supported
-                for attempt in range(max_retries):
-                    tick = mt5.symbol_info_tick(symbol)
-                    if not tick:
-                        return False, f"No price for {symbol}"
-                    price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+                logger.info(f"Close trade - Symbol {symbol} filling_mode bitmask: {filling_mode}")
+                
+                filling_modes = [
+                    (mt5.ORDER_FILLING_FOK, "FOK"),
+                    (mt5.ORDER_FILLING_IOC, "IOC"),
+                    (mt5.ORDER_FILLING_RETURN, "Return")
+                ]
+                
+                supported_modes = []
+                for mode_constant, mode_name in filling_modes:
+                    if filling_mode & mode_constant:
+                        supported_modes.append((mode_constant, mode_name))
+                        logger.info(f"Close trade - Symbol {symbol} supports filling mode: {mode_name} ({mode_constant})")
+                
+                if not supported_modes:
+                    logger.warning(f"Close trade - No standard filling modes detected for {symbol}. Using default IOC.")
+                    supported_modes = [(mt5.ORDER_FILLING_IOC, "IOC")]
+                
+                last_error = None
+                for mode_constant, mode_name in supported_modes:
                     request = {
                         "action": mt5.TRADE_ACTION_DEAL,
                         "symbol": symbol,
@@ -427,16 +518,18 @@ class MT5Connector:
                         "price": price,
                         "magic": pos.magic,
                         "comment": f"Close {ticket}",
-                        "type_filling": filling_type,
-                        "deviation": 20 + attempt * 10
+                        "type_filling": mode_constant,
+                        "deviation": 20
                     }
+                    
+                    logger.info(f"Attempting close with {mode_name} filling mode ({mode_constant}) for {symbol}")
+                    logger.debug(f"Close request: {request}")
+                    
                     result = mt5.order_send(request)
-                    if result is None:
-                        error = mt5.last_error()
-                        error_code = error[0] if isinstance(error, tuple) else getattr(error, 'code', -1)
-                        error_comment = error[1] if isinstance(error, tuple) else getattr(error, 'comment', 'Unknown error')
-                        return False, f"Close failed: Code: {error_code} - {error_comment}"
+                    logger.info(f"MT5 close result for {mode_name}: retcode={result.retcode}, comment='{result.comment}'")
+                    
                     if result.retcode == mt5.TRADE_RETCODE_DONE:
+                        logger.info(f"Close successful with {mode_name} filling mode")
                         return True, {
                             "deal": result.deal,
                             "retcode": result.retcode,
@@ -444,319 +537,398 @@ class MT5Connector:
                             "volume": result.volume,
                             "profit": pos.profit,
                             "symbol": symbol,
-                            "position_type": position_type
+                            "filling_mode_used": mode_name
                         }
-                    if result.retcode == 10021 and attempt < max_retries - 1:
-                        filling_type = supported_fillings[1] if len(supported_fillings) > 1 else filling_type
-                        time.sleep(0.5)
-                        continue
-                    error_codes = {
-                        10018: "Market closed",
-                        10019: "Insufficient funds",
-                        10020: "Prices changed",
-                        10021: "Invalid request (check volume, symbol, or market status)",
-                        10022: "Invalid SL/TP",
-                        10017: "Invalid parameters",
-                        10027: "AutoTrading disabled",
-                        10030: "Invalid order filling type"
-                    }
-                    error_msg = error_codes.get(result.retcode, f"Error {result.retcode}")
-                    return False, f"Close failed: {error_msg}"
-                return False, f"Close failed after {max_retries} attempts"
+                    else:
+                        error_msg = {
+                            mt5.TRADE_RETCODE_REQUOTE: "Requote detected",
+                            mt5.TRADE_RETCODE_REJECT: "Order rejected",
+                            mt5.TRADE_RETCODE_INVALID: "Invalid request parameters",
+                            mt5.TRADE_RETCODE_INVALID_FILL: "Invalid filling type",
+                            mt5.TRADE_RETCODE_INVALID_VOLUME: "Invalid volume",
+                            mt5.TRADE_RETCODE_NO_MONEY: "Insufficient funds",
+                            mt5.TRADE_RETCODE_TRADE_DISABLED: "Trading disabled",
+                            mt5.TRADE_RETCODE_MARKET_CLOSED: "Market closed",
+                            mt5.TRADE_RETCODE_INVALID_PRICE: "Invalid price",
+                            mt5.TRADE_RETCODE_INVALID_STOPS: "Invalid stops"
+                        }.get(result.retcode, f"Unknown error code: {result.retcode}")
+                        
+                        last_error = {"code": result.retcode, "message": f"{error_msg} (tried {mode_name})"}
+                        logger.warning(f"Close failed with {mode_name} filling mode: {error_msg}")
+                        
+                        if result.retcode in [
+                            mt5.TRADE_RETCODE_TRADE_DISABLED,
+                            mt5.TRADE_RETCODE_MARKET_CLOSED,
+                            mt5.TRADE_RETCODE_INVALID_VOLUME
+                        ]:
+                            break
+                
+                if last_error:
+                    return False, last_error
+                else:
+                    return False, {"code": 10030, "message": f"All filling modes failed for close of {symbol}"}
+                    
         except Exception as e:
-            logger.exception(f"Error closing trade: {str(e)}")
-            return False, str(e)
-
-    def get_positions(self):
-        try:
-            if not self.connected:
-                logger.warning("Attempted to get positions while not connected")
-                return False, {"code": 1004, "message": "Not connected"}
-            with self.mt5_lock:
-                positions = mt5.positions_get()
-                if not positions:
-                    return True, []
-                result = []
-                for pos in positions:
-                    try:
-                        result.append({
-                            "ticket": pos.ticket,
-                            "symbol": pos.symbol,
-                            "type": "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL",
-                            "volume": pos.volume,
-                            "price_open": pos.price_open,
-                            "price_current": pos.price_current,
-                            "sl": pos.sl,
-                            "tp": pos.tp,
-                            "profit": pos.profit,
-                            "time": datetime.fromtimestamp(pos.time).isoformat(),
-                            "comment": pos.comment,
-                            "magic": pos.magic
-                        })
-                    except Exception as e:
-                        logger.error(f"Error processing position {pos.ticket}: {str(e)}")
-                        continue
-                logger.info(f"Retrieved {len(result)} open positions")
-                return True, result
-        except Exception as e:
-            logger.exception(f"Error getting positions: {str(e)}")
+            logger.exception(f"Error closing trade {ticket} for account {self.account_id}: {str(e)}")
             return False, {"code": 1014, "message": str(e)}
 
-# Global connector instance
-connector = MT5Connector()
+    def get_positions(self):
+        self.update_activity()
+        try:
+            if not self.connected:
+                return False, {"code": 1004, "message": "Not connected"}
+            with self.mt5_lock:
+                positions = mt5.positions_get() or []
+                result = []
+                for pos in positions:
+                    result.append({
+                        "ticket": pos.ticket,
+                        "symbol": pos.symbol,
+                        "type": "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL",
+                        "volume": pos.volume,
+                        "price_open": pos.price_open,
+                        "price_current": pos.price_current,
+                        "sl": pos.sl,
+                        "tp": pos.tp,
+                        "profit": pos.profit,
+                        "time": datetime.fromtimestamp(pos.time).isoformat(),
+                        "comment": pos.comment,
+                        "magic": pos.magic
+                    })
+                return True, result
+        except Exception as e:
+            logger.exception(f"Error getting positions for account {self.account_id}: {str(e)}")
+            return False, {"code": 1014, "message": str(e)}
 
-# WebSocket Event Handlers
+    def get_account_info(self):
+        self.update_activity()
+        try:
+            if not self.connected:
+                return False, {"code": 1004, "message": "Not connected"}
+            with self.mt5_lock:
+                account_info = mt5.account_info()
+                if not account_info:
+                    return False, {"code": 1011, "message": "Failed to retrieve account info"}
+                return True, {
+                    "login": account_info.login,
+                    "balance": account_info.balance,
+                    "equity": account_info.equity,
+                    "margin": account_info.margin,
+                    "margin_free": account_info.margin_free,
+                    "trade_allowed": account_info.trade_allowed,
+                    "trade_expert": account_info.trade_expert
+                }
+        except Exception as e:
+            logger.exception(f"Error getting account info for account {self.account_id}: {str(e)}")
+            return False, {"code": 1015, "message": str(e)}
+
+connectors = {}
+connectors_lock = threading.Lock()
+
+def get_connector(account_id):
+    with connectors_lock:
+        if account_id not in connectors:
+            connectors[account_id] = MT5Connector(account_id)
+        return connectors[account_id]
+
+def remove_connector(account_id):
+    with connectors_lock:
+        if account_id in connectors:
+            connector = connectors[account_id]
+            connector.disconnect()
+            del connectors[account_id]
+
+def cleanup_inactive_connectors():
+    with connectors_lock:
+        current_time = time.time()
+        for account_id in list(connectors.keys()):
+            connector = connectors[account_id]
+            if not connector.connected or (current_time - connector.last_activity > 1800 and not connector.active_subscriptions):
+                connector.disconnect()
+                del connectors[account_id]
+
 @socketio.on('connect')
 def handle_connect():
     client_id = request.sid
     secret = request.args.get('secret')
+    account_id = request.args.get('account_id')
     if secret != app.config['SECRET_KEY']:
-        logger.warning(f"Authentication failed for client {client_id}")
         emit('error', {'code': 2000, 'message': 'Authentication failed'})
         disconnect()
         return False
-    logger.info(f"Client connected: {client_id}")
-    emit('connected', {'message': 'Connected to MT5 WebSocket server'})
+    if not account_id:
+        emit('error', {'code': 2004, 'message': 'No account_id provided'})
+        disconnect()
+        return False
+    emit('connected', {'message': f'Connected to MT5 WebSocket server for account {account_id}'})
 
 @socketio.on('disconnect')
 def handle_disconnect():
     client_id = request.sid
-    logger.info(f"Client disconnected: {client_id}")
-    for symbol in list(connector.active_subscriptions.keys()):
-        connector.stop_price_stream(symbol, client_id)
-
-@socketio.on('connect_error')
-def handle_connect_error(error):
-    logger.error(f"Connection error: {str(error)}")
-    emit('error', {'code': 2001, 'message': f'Connection error: {str(error)}'})
+    account_id = request.args.get('account_id')
+    if account_id:
+        connector = get_connector(account_id)
+        for symbol in list(connector.active_subscriptions.keys()):
+            connector.stop_price_stream(symbol, client_id)
 
 @socketio.on('request-data')
-def handle_request_data(symbols):
+def handle_request_data(data):
     client_id = request.sid
-    logger.info(f"Client {client_id} requesting data for symbols: {symbols}")
+    account_id = data.get('account_id') or request.args.get('account_id')
+    symbols = data.get('symbols', [])
+    if not account_id:
+        return emit('error', {'code': 2004, 'message': 'No account_id provided'})
+    connector = get_connector(account_id)
     if not connector.connected:
-        logger.warning(f"Client {client_id} requested data while MT5 not connected")
-        emit('error', {'code': 2002, 'message': 'MT5 not connected'})
-        return
-    if not isinstance(symbols, list):
-        symbols = [symbols] if symbols else []
+        return emit('error', {'code': 2002, 'message': 'MT5 not connected'})
     for symbol in symbols:
-        try:
-            socketio.server.enter_room(client_id, f'symbol_{symbol}')
-            connector.start_price_stream(symbol, client_id)
-        except Exception as e:
-            logger.error(f"Error starting stream for {symbol}: {str(e)}")
-            emit('error', {'code': 2003, 'message': f'Error starting stream for {symbol}: {str(e)}'})
+        socketio.server.enter_room(client_id, f'account_{account_id}_symbol_{symbol}')
+        connector.start_price_stream(symbol, client_id)
 
 @socketio.on('stop-data')
-def handle_stop_data(symbols):
+def handle_stop_data(data):
     client_id = request.sid
-    logger.info(f"Client {client_id} stopping data for symbols: {symbols}")
-    if not isinstance(symbols, list):
-        symbols = [symbols] if symbols else []
+    account_id = data.get('account_id') or request.args.get('account_id')
+    symbols = data.get('symbols', [])
+    if not account_id:
+        return emit('error', {'code': 2004, 'message': 'No account_id provided'})
+    connector = get_connector(account_id)
     for symbol in symbols:
-        try:
-            socketio.server.leave_room(client_id, f'symbol_{symbol}')
-            connector.stop_price_stream(symbol, client_id)
-        except Exception as e:
-            logger.error(f"Error stopping stream for {symbol}: {str(e)}")
+        socketio.server.leave_room(client_id, f'account_{account_id}_symbol_{symbol}')
+        connector.stop_price_stream(symbol, client_id)
 
-# REST API Endpoints
 @app.route('/connect', methods=['POST'])
 def connect():
-    try:
-        data = request.json
-        if not data:
-            logger.error("No JSON data provided in connect request")
-            return jsonify({"success": False, "error": {"code": 3000, "message": "No JSON data provided"}}), 400
-        server = data.get('server')
-        login = data.get('login')
-        password = data.get('password')
-        if not all([server, login, password]):
-            logger.error("Missing server, login, or password in connect request")
-            return jsonify({"success": False, "error": {"code": 3001, "message": "Missing server, login, or password"}}), 400
-        success, result = connector.connect(server, login, password)
-        if success:
-            return jsonify({"success": True, "data": result})
-        else:
-            return jsonify({"success": False, "error": result}), 400
-    except Exception as e:
-        logger.exception(f"Error in connect endpoint: {str(e)}")
-        return jsonify({"success": False, "error": {"code": 3002, "message": str(e)}}), 500
+    data = request.json
+    server = data.get('server')
+    login = data.get('login')
+    password = data.get('password')
+    terminal_path = data.get('terminal_path')
+    account_id = data.get('account_id', str(uuid.uuid4()))
+    if not all([server, login, password]):
+        return jsonify({"success": False, "error": {"code": 3001, "message": "Missing parameters"}}), 400
+    connector = get_connector(account_id)
+    success, result = connector.connect(server, login, password, terminal_path)
+    if success:
+        return jsonify({"success": True, "data": {**result, "account_id": account_id}})
+    else:
+        remove_connector(account_id)
+        return jsonify({"success": False, "error": result}), 400
 
 @app.route('/disconnect', methods=['POST'])
 def disconnect_endpoint():
-    try:
-        success, result = connector.disconnect()
-        if success:
-            return jsonify({"success": True, "data": result})
-        else:
-            return jsonify({"success": False, "error": result}), 400
-    except Exception as e:
-        logger.exception(f"Error in disconnect endpoint: {str(e)}")
-        return jsonify({"success": False, "error": {"code": 3003, "message": str(e)}}), 500
+    data = request.json
+    account_id = data.get('account_id')
+    if not account_id:
+        return jsonify({"success": False, "error": {"code": 3008, "message": "No account_id provided"}}), 400
+    connector = get_connector(account_id)
+    success, result = connector.disconnect()
+    if success:
+        remove_connector(account_id)
+        return jsonify({"success": True, "data": result})
+    else:
+        return jsonify({"success": False, "error": result}), 400
 
 @app.route('/symbols', methods=['GET'])
-def get_symbols():
-    try:
-        success, result = connector.get_symbols()
-        if success:
-            return jsonify({"success": True, "data": result})
-        else:
-            return jsonify({"success": False, "error": result}), 400
-    except Exception as e:
-        logger.exception(f"Error in symbols endpoint: {str(e)}")
-        return jsonify({"success": False, "error": {"code": 3004, "message": str(e)}}), 500
+def get_symbols_endpoint():
+    account_id = request.args.get('account_id')
+    if not account_id:
+        return jsonify({"success": False, "error": {"code": 3008, "message": "No account_id provided"}}), 400
+    connector = get_connector(account_id)
+    success, result = connector.get_symbols()
+    return jsonify({"success": success, "data" if success else "error": result})
 
 @app.route('/symbol_info/<symbol>', methods=['GET'])
-@app.route('/symbol/<symbol>', methods=['GET'])
-def get_symbol_info(symbol):
-    try:
-        success, result = connector.get_symbol_info(symbol)
-        if success:
-            return jsonify({"success": True, "data": result})
-        else:
-            return jsonify({"success": False, "error": result}), 400
-    except Exception as e:
-        logger.exception(f"Error in symbol_info endpoint for {symbol}: {str(e)}")
-        return jsonify({"success": False, "error": {"code": 3005, "message": str(e)}}), 500
+def get_symbol_info_endpoint(symbol):
+    account_id = request.args.get('account_id')
+    if not account_id:
+        return jsonify({"success": False, "error": {"code": 3008, "message": "No account_id provided"}}), 400
+    connector = get_connector(account_id)
+    success, result = connector.get_symbol_info(symbol)
+    return jsonify({"success": success, "data" if success else "error": result})
 
 @app.route('/price/<symbol>', methods=['GET'])
-def get_price(symbol):
-    try:
-        success, result = connector.get_price(symbol)
-        if success:
-            return jsonify({"success": True, "data": result})
-        else:
-            return jsonify({"success": False, "error": result}), 400
-    except Exception as e:
-        logger.exception(f"Error in price endpoint for {symbol}: {str(e)}")
-        return jsonify({"success": False, "error": {"code": 3006, "message": str(e)}}), 500
+def get_price_endpoint(symbol):
+    account_id = request.args.get('account_id')
+    if not account_id:
+        return jsonify({"success": False, "error": {"code": 3008, "message": "No account_id provided"}}), 400
+    connector = get_connector(account_id)
+    success, result = connector.get_price(symbol)
+    return jsonify({"success": success, "data" if success else "error": result})
 
 @app.route('/trade', methods=['POST'])
-def trade():
-    try:
-        data = request.json
-        if not data:
-            return jsonify({"success": False, "error": "No JSON data provided"}), 400
-        symbol = data.get('symbol')
-        volume = float(data.get('volume', 0.1))
-        order_type = data.get('type')
-        sl_distance = float(data.get('sl_distance', 0)) if data.get('sl_distance') else None
-        tp_distance = float(data.get('tp_distance', 0)) if data.get('tp_distance') else None
-        comment = data.get('comment', '')
-        magic = int(data.get('magic', 0))
-        if not all([symbol, order_type]):
-            return jsonify({"success": False, "error": "Missing symbol or order type"}), 400
-        success, result = connector.place_trade(symbol, volume, order_type, sl_distance, tp_distance, comment, magic)
-        if success:
-            return jsonify({"success": True, "data": result})
-        else:
-            return jsonify({"success": False, "error": result}), 400
-    except ValueError as e:
-        return jsonify({"success": False, "error": f"Invalid numeric value: {str(e)}"}), 400
-    except Exception as e:
-        logger.exception(f"Error in trade endpoint: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
+def trade_endpoint():
+    data = request.json
+    account_id = data.get('account_id')
+    if not account_id:
+        return jsonify({"success": False, "error": {"code": 3008, "message": "No account_id provided"}}), 400
+    connector = get_connector(account_id)
+    success, result = connector.place_trade(
+        data.get('symbol'),
+        data.get('volume', 0.1),
+        data.get('type'),
+        data.get('sl_distance'),
+        data.get('tp_distance'),
+        data.get('comment', ''),
+        data.get('magic', 0),
+        data.get('filling_mode', 'IOC')  # Default to IOC
+    )
+    return jsonify({"success": success, "data" if success else "error": result})
 
 @app.route('/close', methods=['POST'])
-def close():
-    try:
-        data = request.json
-        if not data:
-            return jsonify({"success": False, "error": "No JSON data provided"}), 400
-        ticket = data.get('ticket')
-        volume = data.get('volume')
-        symbol = data.get('symbol')
-        if not ticket:
-            return jsonify({"success": False, "error": "Missing ticket"}), 400
-        try:
-            ticket = int(ticket)
-            volume = float(volume) if volume else None
-        except ValueError as e:
-            return jsonify({"success": False, "error": f"Invalid ticket or volume format: {str(e)}"}), 400
-        success, result = connector.close_trade(ticket, volume, symbol)
-        if success:
-            return jsonify({"success": True, "data": result})
-        else:
-            return jsonify({"success": False, "error": result}), 400
-    except Exception as e:
-        logger.exception(f"Error in close endpoint: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
+def close_endpoint():
+    data = request.json
+    account_id = data.get('account_id')
+    if not account_id:
+        return jsonify({"success": False, "error": {"code": 3008, "message": "No account_id provided"}}), 400
+    connector = get_connector(account_id)
+    success, result = connector.close_trade(data.get('ticket'), data.get('volume'), data.get('symbol'))
+    return jsonify({"success": success, "data" if success else "error": result})
 
 @app.route('/positions', methods=['GET'])
-def get_positions():
-    try:
-        success, result = connector.get_positions()
-        if success:
-            return jsonify({"success": True, "data": result})
-        else:
-            return jsonify({"success": False, "error": result}), 400
-    except Exception as e:
-        logger.exception(f"Error in positions endpoint: {str(e)}")
-        return jsonify({"success": False, "error": {"code": 3013, "message": str(e)}}), 500
+def get_positions_endpoint():
+    account_id = request.args.get('account_id')
+    if not account_id:
+        return jsonify({"success": False, "error": {"code": 3008, "message": "No account_id provided"}}), 400
+    connector = get_connector(account_id)
+    success, result = connector.get_positions()
+    return jsonify({"success": success, "data" if success else "error": result})
 
-@app.route('/symbol_filling/<symbol>', methods=['GET'])
-def get_symbol_filling(symbol):
+@app.route('/account_info', methods=['GET'])
+def get_account_info_endpoint():
+    account_id = request.args.get('account_id')
+    if not account_id:
+        return jsonify({"success": False, "error": {"code": 3008, "message": "No account_id provided"}}), 400
+    connector = get_connector(account_id)
+    success, result = connector.get_account_info()
+    logger.info(f"Account info requested for {account_id}: Success={success}, Result={result}")
+    return jsonify({"success": success, "data" if success else "error": result})
+
+@app.route('/debug/symbol/<symbol>', methods=['GET'])
+def debug_symbol_endpoint(symbol):
+    account_id = request.args.get('account_id')
+    if not account_id:
+        return jsonify({"success": False, "error": {"code": 3008, "message": "No account_id provided"}}), 400
+    
+    connector = get_connector(account_id)
+    
     try:
-        success, result = connector.get_symbol_info(symbol)
-        if success:
-            filling_mode = result.get('filling_mode', 0)
-            supported_fillings = []
-            if filling_mode & 1:
-                supported_fillings.append('FOK')
-            if filling_mode & 2:
-                supported_fillings.append('IOC')
-            if filling_mode & 4:
-                supported_fillings.append('RETURN')
+        if not connector.connected:
+            return jsonify({"success": False, "error": {"code": 1004, "message": "Not connected"}})
+        
+        with connector.mt5_lock:
+            if not mt5.symbol_select(symbol, True):
+                last_err = mt5.last_error()
+                return jsonify({"success": False, "error": {"code": 1006, "message": f"Symbol {symbol} not selected. Last error: {last_err}"}})
+            
+            info = mt5.symbol_info(symbol)
+            if not info:
+                return jsonify({"success": False, "error": {"code": 1007, "message": f"Symbol {symbol} not found"}})
+            
+            filling_mode = info.filling_mode
+            
+            filling_analysis = {
+                "raw_filling_mode": filling_mode,
+                "supported_modes": [],
+                "mode_details": {}
+            }
+            
+            modes = [
+                (mt5.ORDER_FILLING_FOK, "FOK", "Fill or Kill"),
+                (mt5.ORDER_FILLING_IOC, "IOC", "Immediate or Cancel"),
+                (mt5.ORDER_FILLING_RETURN, "Return", "Partial fills allowed")
+            ]
+            
+            for mode_constant, mode_name, description in modes:
+                is_supported = bool(filling_mode & mode_constant)
+                filling_analysis["mode_details"][mode_name] = {
+                    "constant": mode_constant,
+                    "supported": is_supported,
+                    "description": description
+                }
+                if is_supported:
+                    filling_analysis["supported_modes"].append(mode_name)
+            
+            tick = mt5.symbol_info_tick(symbol)
+            tick_info = {
+                "available": bool(tick),
+                "bid": tick.bid if tick else None,
+                "ask": tick.ask if tick else None,
+                "time": datetime.fromtimestamp(tick.time).isoformat() if tick else None
+            }
+            
             return jsonify({
                 "success": True,
                 "data": {
                     "symbol": symbol,
-                    "filling_mode": filling_mode,
-                    "supported_fillings": supported_fillings
+                    "symbol_info": {
+                        "name": info.name,
+                        "trade_mode": info.trade_mode,
+                        "trade_allowed": info.trade_mode != 0,
+                        "point": info.point,
+                        "digits": info.digits,
+                        "volume_min": info.volume_min,
+                        "volume_max": info.volume_max,
+                        "volume_step": info.volume_step,
+                        "stops_level": getattr(info, 'stops_level', 0)
+                    },
+                    "filling_mode_analysis": filling_analysis,
+                    "current_tick": tick_info,
+                    "account_info": {
+                        "login": mt5.account_info().login if mt5.account_info() else None,
+                        "trade_allowed": mt5.account_info().trade_allowed if mt5.account_info() else None,
+                        "trade_expert": mt5.account_info().trade_expert if mt5.account_info() else None
+                    }
                 }
             })
-        else:
-            return jsonify({"success": False, "error": result}), 400
+            
     except Exception as e:
-        logger.exception(f"Error in symbol_filling endpoint for {symbol}: {str(e)}")
-        return jsonify({"success": False, "error": {"code": 3007, "message": str(e)}}), 500
+        logger.exception(f"Error in debug endpoint for {symbol} for account {account_id}: {str(e)}")
+        return jsonify({"success": False, "error": {"code": 1016, "message": str(e)}})
 
 @app.route('/health', methods=['GET'])
 def health():
-    try:
+    account_id = request.args.get('account_id')
+    if account_id:
+        connector = get_connector(account_id)
         return jsonify({
             "success": True,
             "data": {
                 "status": "running",
+                "account_id": account_id,
                 "connected": connector.connected,
                 "active_subscriptions": list(connector.active_subscriptions.keys()),
-                "active_threads": len([t for t in connector.price_threads.values() if t.is_alive()]),
                 "timestamp": datetime.now().isoformat()
             }
         })
-    except Exception as e:
-        logger.exception(f"Error in health endpoint: {str(e)}")
-        return jsonify({"success": False, "error": {"code": 3012, "message": str(e)}}), 500
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({"success": False, "error": {"code": 404, "message": "Endpoint not found"}}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    logger.exception(f"Internal server error: {str(error)}")
-    return jsonify({"success": False, "error": {"code": 500, "message": "Internal server error"}}), 500
+    return jsonify({
+        "success": True,
+        "data": {
+            "status": "running",
+            "connected_accounts": list(connectors.keys()),
+            "timestamp": datetime.now().isoformat()
+        }
+    })
 
 if __name__ == '__main__':
-    try:
-        logger.info("Starting MT5 WebSocket server...")
-        socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False)
-    except KeyboardInterrupt:
-        logger.info("Server shutdown requested...")
-        connector.disconnect()
-    except Exception as e:
-        logger.exception(f"Failed to start server: {str(e)}")
-    finally:
-        logger.info("Server stopped.")
+    logger.info("Starting MT5 WebSocket server...")
+    def cleanup_loop():
+        while True:
+            time.sleep(300)
+            cleanup_inactive_connectors()
+    cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
+    cleanup_thread.start()
+    
+    # Handle graceful shutdown
+    import signal
+    def handle_shutdown(signum, frame):
+        logger.info("Received shutdown signal, initiating graceful shutdown...")
+        for account_id in list(connectors.keys()):
+            remove_connector(account_id)
+        logger.info("Shutdown complete")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
