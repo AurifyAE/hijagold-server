@@ -25,7 +25,7 @@ if (!twilioPhoneNumber.startsWith("whatsapp:")) {
 
 // Symbol mapping for CRM to MT5
 const SYMBOL_MAPPING = {
-  GOLD: "XAUUSD.#",
+  GOLD: process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix",
 };
 
 // Validate trade data
@@ -79,16 +79,17 @@ export const createTrade = async (req, res, next) => {
       requiredMargin,
       comment,
       stopLoss,
-      takeProfit,
+      takeProfit
     } = req.body;
 
     console.log(`Received trade request: ${JSON.stringify(req.body, null, 2)}`);
-
     // Validate trade data
     const validationError = validateTradeData(req.body);
     if (validationError) {
       throw new Error(`Validation failed: ${validationError}`);
     }
+
+    // console.log(`Received trade request: ${JSON.stringify(req.body, null, 2)}`);
 
     // Fetch user's phone number for WhatsApp messaging
     const account = await Account.findOne({ _id: userId });
@@ -102,14 +103,7 @@ export const createTrade = async (req, res, next) => {
         ""
       )}`;
     }
-    console.log(`User phone number: ${phoneNumber}`);
-
-    // Validate phone number format
-    const phoneRegex = /^whatsapp:\+\d{10,15}$/;
-    if (!phoneRegex.test(phoneNumber)) {
-      console.warn(`Invalid phone number format: ${phoneNumber}, using fallback`);
-      phoneNumber = "whatsapp:+918138823410"; // Fallback number
-    }
+    // console.log(`User phone number: ${phoneNumber}`);
 
     // Pass trade data to service layer
     const tradeResult = await tradingServices.createTrade(adminId, userId, {
@@ -129,9 +123,7 @@ export const createTrade = async (req, res, next) => {
     // Send WhatsApp confirmation message
     const confirmationMessage = `✅ Order Placed!\n📋 Type: ${
       tradeResult.mt5Trade.type
-    }\n💰 Volume: ${tradeResult.mt5Trade.volume} grams\n💵 Price: $${parseFloat(
-      openingPrice
-    ).toFixed(2)}\n📊 Order ID: ${tradeResult.mt5Trade.ticket}\n📡 Symbol: ${
+    }\n💰 Volume: ${tradeResult.mt5Trade.volume} TTBAR\n💵 Price: $${tradeResult.clientOrder.openingPrice}\n📊 Order ID: ${tradeResult.mt5Trade.ticket}\n📡 Symbol: ${
       tradeResult.mt5Trade.symbol
     }\n🕒 ${new Date().toLocaleString("en-US", {
       timeZone: "Asia/Dubai",
@@ -169,7 +161,7 @@ export const createTrade = async (req, res, next) => {
       },
     });
   } catch (error) {
-    console.error(`Error creating trade: ${error.message}, Stack: ${error.stack}`);
+    console.error(`Error creating trade: ${error.message}`);
 
     // Send WhatsApp error message
     const errorMessage = `❌ Order Failed!\n\nError: ${
@@ -179,7 +171,7 @@ export const createTrade = async (req, res, next) => {
       await client.messages.create({
         body: errorMessage,
         from: twilioPhoneNumber,
-        to: phoneNumber || "whatsapp:+918138823410", // Use validated phone number or fallback
+        to: phoneNumber || "whatsapp:+918138823410", // Fallback phone number
       });
       console.log(
         `WhatsApp error message sent to ${
@@ -274,7 +266,7 @@ export const updateTrade = async (req, res, next) => {
     
     const successMessage = `✅ Position Closed Successfully!\n📊 Ticket: ${
       order.ticket
-    }\n💰 Close Price: $${updatedTrade.order.closingPrice}\n📈 P&L: AED ${updatedTrade.order.profit}\n🔄 ${mt5StatusText}\n🕒 ${new Date().toLocaleString("en-US", {
+    }\n💰 Close Price: $${updatedTrade.order.closingPrice}\n📈 P&L: $ ${updatedTrade.order.profit}\n🔄 ${mt5StatusText}\n🕒 ${new Date().toLocaleString("en-US", {
       timeZone: "Asia/Dubai",
     })}\n\n${await getMainMenuMT5()}`;
 

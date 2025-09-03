@@ -31,7 +31,6 @@
     "twilio": "^5.7.1",
     "uuid": "^11.1.0",
     "winston": "^3.17.0",
-    "winston-aws-cloudwatch": "^3.0.0",
-    "ws": "^8.18.3"
+    "winston-aws-cloudwatch": "^3.0.0"
   }
 }

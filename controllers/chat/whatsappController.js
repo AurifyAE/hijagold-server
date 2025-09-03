@@ -34,7 +34,7 @@ const twilioPhoneNumber = process.env.TWILIO_WHATSAPP_NUMBER;
 const client = new Twilio(accountSid, authToken);
 
 // Constants
-const SYMBOL_MAPPING = { GOLD: "XAUUSD.#" };
+const SYMBOL_MAPPING = { GOLD: process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix" };
 const UNAUTHORIZED_MESSAGE = `🚫 *Access Denied*
 
 ┌─────────────────────────┐
@@ -388,7 +388,6 @@ const createWelcomeMessage = async (
 
 💰 *Equity Balance:* $${formatCurrency(equity)}
 💵 *Available Balance:* $${formatCurrency(availableBalance)}
-📊 *Total Portfolio:* $${formatCurrency(totalPortfolioValue)}
 
 ┌─────────────────────────┐
 │  📈 *LIVE MARKET DATA*  │
@@ -511,7 +510,7 @@ const createOrderConfirmation = (
 └─────────────────────────┘
 
 🎯 *Action:* ${orderType} ${symbol}
-⚖️ *Volume:* ${volume} grams
+⚖️ *Volume:* ${volume} TTBAR
 💰 *Price:* $${price.toFixed(2)}
 💸 *Total Cost:* $${totalCost.toFixed(2)}
 
@@ -550,7 +549,7 @@ const createOrderSuccessMessage = async (
 
 🎫 *Ticket:* #${ticket}
 🎯 *Type:* ${orderType} ${symbol}
-⚖️ *Volume:* ${volume} grams
+⚖️ *Volume:* ${volume} TTBAR
 💰 *Price:* $${price.toFixed(2)}
 💸 *Total:* $${(volume * price).toFixed(2)}
 
@@ -598,7 +597,7 @@ const createPositionsMessage = async (positions, totalPL) => {
       pos.symbol
     }
 🎫 Ticket: #${pos.ticket}
-⚖️ Volume: ${pos.volume} grams
+⚖️ Volume: ${pos.volume} TTBAR
 💰 Open: $${pos.openPrice?.toFixed(2)}
 📊 Current: $${pos.currentPrice?.toFixed(2)}
 ${plColor} P&L: ${plSign}$${pos.profit?.toFixed(2)}
@@ -760,7 +759,10 @@ const refreshMarketData = async (clientId) => {
   if (cached && now - cached.timestamp < MARKET_DATA_TTL) return;
 
   try {
-    await mt5MarketDataService.getMarketData("XAUUSD.#", clientId);
+    await mt5MarketDataService.getMarketData(
+      process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix",
+      clientId
+    );
     marketDataCache.set(clientId, { timestamp: now });
   } catch (error) {
     console.error(`Market data refresh error: ${error.message}`);
@@ -780,7 +782,9 @@ const initializeUserSession = (from, accountId, profileName) => {
 // Get current gold price
 const getCurrentGoldPrice = async () => {
   try {
-    const marketData = await mt5MarketDataService.getMarketData("XAUUSD.#");
+    const marketData = await mt5MarketDataService.getMarketData(
+      process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix"
+    );
     return marketData?.bid || 0;
   } catch (error) {
     console.error(`Gold price error: ${error.message}`);
@@ -1023,7 +1027,9 @@ export const handleMainMenuMT5 = async (input, session, phoneNumber) => {
     case "3":
     case "price":
     case "prices":
-      const marketData = await mt5MarketDataService.getMarketData("XAUUSD.#");
+      const marketData = await mt5MarketDataService.getMarketData(
+        process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix"
+      );
       const spread = marketData ? (marketData.ask - marketData.bid) * 10 : null;
       return await createPriceMessage(marketData, spread);
     case "4":
@@ -1057,7 +1063,9 @@ export const handleVolumeInputMT5 = async (input, session, phoneNumber) => {
   }
 
   try {
-    const marketData = await mt5MarketDataService.getMarketData("XAUUSD.#");
+    const marketData = await mt5MarketDataService.getMarketData(
+      process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix"
+    );
     if (!marketData) {
       session.state = "MAIN_MENU";
       return `${await createErrorMessage(
@@ -1144,27 +1152,30 @@ export const handleOrderConfirmationMT5 = async (
       throw new Error("User account not found");
     }
 
-    const marketData = await mt5MarketDataService.getMarketData("XAUUSD.#");
+    const marketData = await mt5MarketDataService.getMarketData(
+      process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix"
+    );
     if (!marketData || !marketData.ask || !marketData.bid) {
       throw new Error("Failed to fetch live market data");
     }
 
     const adjustedAskPrice = (
-      parseFloat(marketData.ask) + (parseFloat(account.askSpread) || 0)
+      parseFloat(marketData.bid) + (parseFloat(account.askSpread) || 0)
     ).toFixed(2);
     const adjustedBidPrice = (
       parseFloat(marketData.bid) - (parseFloat(account.bidSpread) || 0)
     ).toFixed(2);
 
-    const price =
+    // Use market price for balance check (before execution)
+    const estimatedPrice =
       session.pendingOrder.type === "BUY" ? adjustedAskPrice : adjustedBidPrice;
     const volume = parseFloat(session.pendingOrder.volume);
 
-    const tradeCost = calculateTradeCost(price, volume);
+    const tradeCost = calculateTradeCost(estimatedPrice, volume);
     const requiredMargin = tradeCost * (MINIMUM_BALANCE_PERCENTAGE / 100);
 
     const balanceCheck = await checkSufficientBalance(
-      price,
+      estimatedPrice,
       volume,
       phoneNumber
     );
@@ -1184,43 +1195,95 @@ export const handleOrderConfirmationMT5 = async (
       magic: 123456,
     };
 
-    const result = await mt5Service.placeTrade({
+    console.log("Placing MT5 trade with data:", tradeData);
+
+    // Place the MT5 trade
+    const mt5Result = await mt5Service.placeTrade({
       ...tradeData,
       symbol: SYMBOL_MAPPING[session.pendingOrder.symbol],
     });
 
-    if (!result.success) {
-      throw new Error(result.error || "MT5 trade failed");
+    console.log("MT5 trade result:", JSON.stringify(mt5Result, null, 2));
+
+    if (!mt5Result.success) {
+      throw new Error(mt5Result.error || "MT5 trade failed");
     }
 
+    // Validate required fields are present
+    if (!mt5Result.price) {
+      throw new Error("MT5 response missing execution price");
+    }
+    if (!mt5Result.ticket) {
+      throw new Error("MT5 response missing ticket number");
+    }
+
+    // Extract data from MT5 response (flat structure)
+    const actualExecutionPrice = parseFloat(mt5Result.price);
+    const actualVolume = parseFloat(mt5Result.volume);
+    const actualTicket = mt5Result.ticket.toString();
+
+    console.log("MT5 execution details:", {
+      actualExecutionPrice,
+      estimatedPrice,
+      actualVolume,
+      actualTicket,
+      symbol: mt5Result.symbol
+    });
+
+    // Recalculate margin based on actual execution price
+    const actualTradeCost = calculateTradeCost(actualExecutionPrice, actualVolume);
+    const actualRequiredMargin = actualTradeCost * (MINIMUM_BALANCE_PERCENTAGE / 100);
+
+    // Create CRM trade data with actual MT5 execution details
+    // Pass the MT5 execution price - createTrade will handle spread calculation
     const crmTradeData = {
       orderNo,
-      type: result.type,
-      volume: result.volume,
-      ticket: result.ticket,
+      type: session.pendingOrder.type,
+      volume: actualVolume,
+      ticket: actualTicket,
       symbol: session.pendingOrder.symbol,
-      price: parseFloat(price),
+      price: actualExecutionPrice, // MT5 execution price
       openingDate: new Date(),
-      requiredMargin: requiredMargin,
+      requiredMargin: actualRequiredMargin,
       comment: tradeData.comment,
+      stopLoss: session.pendingOrder.stopLoss || 0,
+      takeProfit: session.pendingOrder.takeProfit || 0,
     };
 
-    await createTrade(adminId, userId, crmTradeData, mongoSession);
+    console.log("Creating CRM trade with data:", crmTradeData);
+
+    // Create trade in CRM system - this will handle the price calculations with spreads
+    const tradeResult = await createTrade(adminId, userId, crmTradeData, mongoSession);
+
+    console.log("CRM trade created successfully:", {
+      orderId: tradeResult.clientOrder._id,
+      ticket: tradeResult.clientOrder.ticket,
+      status: tradeResult.clientOrder.orderStatus,
+      mt5Price: tradeResult.priceDetails.currentPrice,
+      clientPrice: tradeResult.priceDetails.openingPrice
+    });
 
     await mongoSession.commitTransaction();
     transactionCommitted = true;
 
     console.log(
-      `Trade successfully created and committed for ticket: ${result.ticket}`
+      `Trade successfully created and committed for ticket: ${actualTicket}`
     );
 
+    // Create success message with actual execution details
     const responseMessage = await createOrderSuccessMessage(
-      result,
-      result.type,
-      result.volume,
-      parseFloat(price),
+      {
+        success: true,
+        ticket: actualTicket,
+        price: estimatedPrice,
+        volume: actualVolume,
+        type: session.pendingOrder.type
+      },
+      session.pendingOrder.type,
+      actualVolume,
+      tradeResult.priceDetails.openingPrice, // Use client price for display
       session.pendingOrder.symbol,
-      result.ticket
+      actualTicket
     );
 
     session.state = "MAIN_MENU";
@@ -1237,6 +1300,7 @@ export const handleOrderConfirmationMT5 = async (
       }
     }
     console.error(`Order placement error: ${error.message}`);
+    console.error(`Error stack: ${error.stack}`);
     session.state = "MAIN_MENU";
     session.pendingOrder = null;
     return `${await createErrorMessage(

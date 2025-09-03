@@ -11,7 +11,7 @@ const TTB_FACTOR = 116.64;
 
 // Symbol mapping for CRM to MT5
 const SYMBOL_MAPPING = {
-  GOLD: "XAUUSD.#",
+  GOLD: process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix",
 };
 
 // Generate unique entry ID for ledger
@@ -51,7 +51,7 @@ export const createTrade = async (
       throw new Error("Insufficient cash balance");
     }
 
-    // Calculate client order price with spread
+    // Calculate client order price with spread (initially)
     let clientOrderPrice = currentPrice;
 
     const goldWeightValue =
@@ -60,7 +60,7 @@ export const createTrade = async (
     const lpCurrentPrice =
       (currentPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
 
-    // Calculate LP Profit
+    // Calculate LP Profit (initially)
     const gramValue = TTB_FACTOR / TROY_OUNCE_GRAMS;
 
     let lpProfitValue;
@@ -73,15 +73,15 @@ export const createTrade = async (
       lpProfitValue = gramValue * volume * (userAccount.bidSpread || 0);
     }
 
-    // Create order
+    // Create order (initially with currentPrice for both price and openingPrice)
     const newOrder = new Order({
       orderNo: tradeData.orderNo,
       type: tradeData.type,
       volume: tradeData.volume,
       symbol: tradeData.symbol,
       requiredMargin: requiredMargin,
-      price: tradeData.price.toFixed(2),
-      openingPrice: currentPrice.toFixed(2),
+      price: currentPrice.toFixed(2), // Use currentPrice initially
+      openingPrice: currentPrice.toFixed(2), // Use currentPrice initially
       profit: 0,
       user: userId,
       adminId: adminId,
@@ -97,7 +97,7 @@ export const createTrade = async (
     });
     const savedOrder = await newOrder.save({ session: mongoSession });
 
-    // Create LP position
+    // Create LP position (initially with currentPrice)
     const lpPosition = new LPPosition({
       positionId: tradeData.orderNo,
       type: tradeData.type,
@@ -105,15 +105,15 @@ export const createTrade = async (
       volume: tradeData.volume,
       adminId: adminId,
       symbol: tradeData.symbol,
-      entryPrice:  tradeData.price.toFixed(2),
+      entryPrice: currentPrice.toFixed(2), // Use currentPrice initially
       openDate: tradeData.openingDate,
-      currentPrice:  tradeData.price.toFixed(2),
+      currentPrice: currentPrice.toFixed(2), // Use currentPrice initially
       clientOrders: savedOrder._id,
       status: "OPEN",
     });
     const savedLPPosition = await lpPosition.save({ session: mongoSession });
 
-    // Create LP Profit entry
+    // Create LP Profit entry (initially)
     const lpProfit = new LPProfit({
       orderNo: tradeData.orderNo,
       orderType: tradeData.type,
@@ -148,7 +148,7 @@ export const createTrade = async (
       { session: mongoSession, new: true }
     );
 
-    // Create ledger entries
+    // Create ledger entries (initially with current values)
     const orderLedgerEntry = new Ledger({
       entryId: generateEntryId("ORD"),
       entryType: "ORDER",
@@ -171,7 +171,7 @@ export const createTrade = async (
       adminId: adminId,
       date: new Date(tradeData.openingDate),
     });
-    await orderLedgerEntry.save({ session: mongoSession });
+    const savedOrderLedger = await orderLedgerEntry.save({ session: mongoSession });
 
     const lpLedgerEntry = new Ledger({
       entryId: generateEntryId("LP"),
@@ -198,7 +198,7 @@ export const createTrade = async (
       adminId: adminId,
       date: new Date(tradeData.openingDate),
     });
-    await lpLedgerEntry.save({ session: mongoSession });
+    const savedLPLedger = await lpLedgerEntry.save({ session: mongoSession });
 
     const cashTransactionLedgerEntry = new Ledger({
       entryId: generateEntryId("TRX"),
@@ -218,41 +218,38 @@ export const createTrade = async (
       date: new Date(tradeData.openingDate),
       notes: `Cash margin allocated for ${tradeData.type} order on ${tradeData.symbol}`,
     });
-    await cashTransactionLedgerEntry.save({ session: mongoSession });
+    const savedCashLedger = await cashTransactionLedgerEntry.save({ session: mongoSession });
 
    
     // Validate and place MT5 trade
-    const accountKey = "5003"
-   const mt5Symbol = SYMBOL_MAPPING[tradeData.symbol];
-  if (!mt5Symbol) {
-    throw new Error(`Invalid symbol: ${tradeData.symbol}. No MT5 mapping found.`);
-  }
+    const mt5Symbol = SYMBOL_MAPPING[tradeData.symbol];
+    if (!mt5Symbol) {
+      throw new Error(`Invalid symbol: ${tradeData.symbol}. No MT5 mapping found.`);
+    }
 
-  const validatedSymbol = await mt5Service.validateSymbol(accountKey,mt5Symbol);
-  console.log(`Validated MT5 Symbol: ${validatedSymbol}`);
+    const validatedSymbol = await mt5Service.validateSymbol(mt5Symbol);
+    console.log(`Validated MT5 Symbol: ${validatedSymbol}`);
 
-  const priceData = await mt5Service.getPrice(accountKey,validatedSymbol);
-  console.log(`Market Price for ${validatedSymbol}: ${JSON.stringify(priceData)}`);
-  if (!priceData || !priceData.bid || !priceData.ask) {
-    throw new Error(`No valid price quote available for ${validatedSymbol}`);
-  }
+    const priceData = await mt5Service.getPrice(validatedSymbol);
+    console.log(`Market Price for ${validatedSymbol}: ${JSON.stringify(priceData)}`);
+    if (!priceData || !priceData.bid || !priceData.ask) {
+      throw new Error(`No valid price quote available for ${validatedSymbol}`);
+    }
 
-  const mt5TradeData = {
-    symbol: validatedSymbol, // Use validated symbol
-    volume: tradeData.volume,
-    type: tradeData.type,
-    slDistance: null,
-    tpDistance: null,
-    comment: tradeData.comment,
-    magic: 123456,
-    deviation: 20,
-    filling_mode: "IOC"
-  };
-  console.log(
-    `MT5 Trade Parameters: ${JSON.stringify(mt5TradeData, null, 2)}`
-  );
+    const mt5TradeData = {
+      symbol: validatedSymbol, // Use validated symbol
+      volume: tradeData.volume,
+      type: tradeData.type,
+      slDistance: null,
+      tpDistance: null,
+      comment: tradeData.comment,
+      magic: 123456,
+    };
+    console.log(
+      `MT5 Trade Parameters: ${JSON.stringify(mt5TradeData, null, 2)}`
+    );
 
-    const mt5Result = await mt5Service.placeTrade(accountKey,mt5TradeData);
+    const mt5Result = await mt5Service.placeTrade(mt5TradeData);
     console.log(`MT5 trade placed successfully: Order ID ${mt5Result.ticket}`);
 
     if (!mt5Result.success) {
@@ -270,18 +267,91 @@ export const createTrade = async (
       );
     }
 
-    // Update CRM trade with MT5 details
-    await updateTradeStatus(
-      adminId,
-      savedOrder._id.toString(),
+    // NOW UPDATE ALL ENTRIES WITH MT5 RESULT AND SPREAD CALCULATIONS
+    
+    // Calculate final prices based on MT5 result and spread
+    const mt5Price = parseFloat(mt5Result.price);
+    let finalClientOpeningPrice;
+    let finalLPPrice = mt5Price; // LP uses actual MT5 price
+    
+    if (tradeData.type === "BUY") {
+      finalClientOpeningPrice = mt5Price + (userAccount.askSpread || 0);
+    } else { // SELL
+      finalClientOpeningPrice = mt5Price - (userAccount.bidSpread || 0);
+    }
+
+    // Calculate updated values with MT5 price
+    const updatedGoldWeightValue = (finalClientOpeningPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
+    const updatedLPCurrentPrice = (finalLPPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
+    
+    // Recalculate LP Profit with actual MT5 price
+    let updatedLPProfitValue;
+    if (tradeData.type === "BUY") {
+      updatedLPProfitValue = gramValue * volume * (userAccount.askSpread || 0);
+    } else {
+      updatedLPProfitValue = gramValue * volume * (userAccount.bidSpread || 0);
+    }
+
+    // Update Order with final prices
+    await Order.findByIdAndUpdate(
+      savedOrder._id,
       {
+        price: finalClientOpeningPrice.toFixed(2),
+        openingPrice: finalClientOpeningPrice.toFixed(2),
         orderStatus: "OPEN",
         ticket: mt5Result.ticket.toString(),
-        openingPrice: mt5Result.price,
         volume: mt5Result.volume,
         symbol: mt5Result.symbol,
       },
-      mongoSession
+      { session: mongoSession }
+    );
+
+    // Update LP Position with MT5 price
+    await LPPosition.findByIdAndUpdate(
+      savedLPPosition._id,
+      {
+        entryPrice: finalLPPrice.toFixed(2),
+        currentPrice: finalLPPrice.toFixed(2),
+      },
+      { session: mongoSession }
+    );
+
+    // Update LP Profit with recalculated value
+    await LPProfit.findByIdAndUpdate(
+      savedLPProfit._id,
+      {
+        value: updatedLPProfitValue.toFixed(2),
+      },
+      { session: mongoSession }
+    );
+
+    // Update Order Ledger Entry
+    await Ledger.findByIdAndUpdate(
+      savedOrderLedger._id,
+      {
+        description: `Margin for ${tradeData.type} ${tradeData.volume} ${
+          tradeData.symbol
+        } @ ${finalClientOpeningPrice.toFixed(2)} (AED ${updatedGoldWeightValue.toFixed(2)})`,
+        'orderDetails.entryPrice': finalClientOpeningPrice,
+        'orderDetails.status': "OPEN",
+      },
+      { session: mongoSession }
+    );
+
+    // Update LP Ledger Entry
+    await Ledger.findByIdAndUpdate(
+      savedLPLedger._id,
+      {
+        description: `LP Position opened for ${tradeData.type} ${
+          tradeData.volume
+        } ${tradeData.symbol} @ ${finalLPPrice.toFixed(
+          2
+        )} (AED ${updatedLPCurrentPrice.toFixed(2)})`,
+        amount: updatedLPCurrentPrice.toFixed(2),
+        'lpDetails.entryPrice': finalLPPrice,
+        'lpDetails.status': "OPEN",
+      },
+      { session: mongoSession }
     );
 
     if (!session) {
@@ -292,9 +362,22 @@ export const createTrade = async (
     }
 
     return {
-      clientOrder: savedOrder,
-      lpPosition: savedLPPosition,
-      lpProfit: savedLPProfit,
+      clientOrder: {
+        ...savedOrder.toObject(),
+        price: finalClientOpeningPrice.toFixed(2),
+        openingPrice: finalClientOpeningPrice.toFixed(2),
+        orderStatus: "OPEN",
+        ticket: mt5Result.ticket.toString(),
+      },
+      lpPosition: {
+        ...savedLPPosition.toObject(),
+        entryPrice: finalLPPrice.toFixed(2),
+        currentPrice: finalLPPrice.toFixed(2),
+      },
+      lpProfit: {
+        ...savedLPProfit.toObject(),
+        value: updatedLPProfitValue.toFixed(2),
+      },
       mt5Trade: {
         ticket: mt5Result.ticket,
         volume: mt5Result.volume,
@@ -307,15 +390,34 @@ export const createTrade = async (
         gold: newMetalBalance,
       },
       requiredMargin,
-      goldWeightValue,
-      lpProfitValue,
+      goldWeightValue: updatedGoldWeightValue,
+      lpProfitValue: updatedLPProfitValue,
       convertedPrice: {
-        client: (goldWeightValue / volume).toFixed(2),
-        lp: (lpCurrentPrice / volume).toFixed(2),
+        client: finalClientOpeningPrice.toFixed(2),
+        lp: finalLPPrice.toFixed(2),
+      },
+      priceDetails: {
+        mt5ExecutionPrice: mt5Price,
+        clientOpeningPrice: finalClientOpeningPrice.toFixed(2),
+        lpPrice: finalLPPrice.toFixed(2),
+        spreadApplied: tradeData.type === "BUY" ? userAccount.askSpread : userAccount.bidSpread,
       },
       ledgerEntries: {
-        order: orderLedgerEntry,
-        lp: lpLedgerEntry,
+        order: {
+          ...orderLedgerEntry,
+          description: `Margin for ${tradeData.type} ${tradeData.volume} ${
+            tradeData.symbol
+          } @ ${finalClientOpeningPrice.toFixed(2)} (AED ${updatedGoldWeightValue.toFixed(2)})`,
+        },
+        lp: {
+          ...lpLedgerEntry,
+          description: `LP Position opened for ${tradeData.type} ${
+            tradeData.volume
+          } ${tradeData.symbol} @ ${finalLPPrice.toFixed(
+            2
+          )} (AED ${updatedLPCurrentPrice.toFixed(2)})`,
+          amount: updatedLPCurrentPrice.toFixed(2),
+        },
         cashTransaction: cashTransactionLedgerEntry,
       },
     };
@@ -407,7 +509,8 @@ export const updateTradeStatus = async (
     }
 
     let mt5CloseResult = null;
-    let actualClosingPrice = null;
+    let mt5ClosingPrice = null; // Actual MT5 closing price
+    let clientClosingPrice = null; // Client closing price with spread applied
 
     if (
       sanitizedData.orderStatus === "CLOSED" &&
@@ -452,9 +555,8 @@ export const updateTradeStatus = async (
               );
             }
             
-            // Use the appropriate price based on order type
-            actualClosingPrice = order.type === "BUY" ? priceData.bid : priceData.ask;
-            sanitizedData.closingPrice = actualClosingPrice;
+            // Use the appropriate price based on order type for MT5 closing
+            mt5ClosingPrice = order.type === "BUY" ? priceData.bid : priceData.ask;
           } else {
             throw new Error(
               `MT5 trade closure failed: ${
@@ -464,8 +566,7 @@ export const updateTradeStatus = async (
           }
         } else {
           // MT5 closure was successful
-          actualClosingPrice = mt5CloseResult.closePrice || mt5CloseResult.data?.price;
-          sanitizedData.closingPrice = actualClosingPrice;
+          mt5ClosingPrice = parseFloat(mt5CloseResult.closePrice || mt5CloseResult.data?.price);
         }
       } catch (mt5Error) {
         console.error(
@@ -488,51 +589,59 @@ export const updateTradeStatus = async (
             if (!priceData || (!priceData.bid && !priceData.ask)) {
               // If we can't get current price, use the last known price or opening price
               console.warn(`No current price available, using opening price as fallback`);
-              actualClosingPrice = parseFloat(order.openingPrice);
+              mt5ClosingPrice = parseFloat(order.openingPrice);
             } else {
-              actualClosingPrice = order.type === "BUY" ? priceData.bid : priceData.ask;
+              mt5ClosingPrice = order.type === "BUY" ? priceData.bid : priceData.ask;
             }
-            
-            sanitizedData.closingPrice = actualClosingPrice;
           } catch (priceError) {
             console.error(`Failed to get price data: ${priceError.message}`);
             // Use opening price as last resort
-            actualClosingPrice = parseFloat(order.openingPrice);
-            sanitizedData.closingPrice = actualClosingPrice;
+            mt5ClosingPrice = parseFloat(order.openingPrice);
           }
         } else {
           throw new Error(`Failed to close MT5 trade: ${mt5Error.message}`);
         }
       }
+
+      // Calculate client closing price with spread applied
+      // For closing positions, the spread logic is reversed:
+      // - When closing a BUY position, we sell at bid price, so subtract bidSpread
+      // - When closing a SELL position, we buy at ask price, so add askSpread
+      if (mt5ClosingPrice !== null) {
+        if (order.type === "BUY") {
+          // Closing a BUY position (selling) - apply bidSpread
+          clientClosingPrice = mt5ClosingPrice - (userAccount.bidSpread || 0);
+        } else {
+          // Closing a SELL position (buying) - apply askSpread
+          clientClosingPrice = mt5ClosingPrice + (userAccount.askSpread || 0);
+        }
+        
+        console.log(`MT5 Closing Price: ${mt5ClosingPrice}, Client Closing Price: ${clientClosingPrice}, Spread Applied: ${order.type === "BUY" ? userAccount.bidSpread : userAccount.askSpread}`);
+        
+        sanitizedData.closingPrice = clientClosingPrice.toFixed(2);
+      }
     }
 
-    // Ensure we have a valid closing price for calculations
-    const currentPrice = actualClosingPrice || parseFloat(sanitizedData.closingPrice);
-    let clientClosingPrice = currentPrice;
-    
-    if (order.type === "BUY") {
-      clientClosingPrice = currentPrice - (userAccount.bidSpread || 0);
-    } else {
-      clientClosingPrice = currentPrice + (userAccount.askSpread || 0);
-    }
-
-    if (sanitizedData.orderStatus === "CLOSED") {
-      sanitizedData.closingPrice = clientClosingPrice.toFixed(2);
+    // Use provided closing price if MT5 closing wasn't performed
+    if (!clientClosingPrice && sanitizedData.closingPrice) {
+      clientClosingPrice = parseFloat(sanitizedData.closingPrice);
     }
 
     const entryPrice = parseFloat(order.openingPrice);
     const volume = parseFloat(order.volume);
 
-    const entryGoldWeightValue =
-      (entryPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
-    const closingGoldWeightValue =
-      (clientClosingPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
+    let clientProfit = 0;
+    if (clientClosingPrice) {
+      const entryGoldWeightValue =
+        (entryPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
+      const closingGoldWeightValue =
+        (clientClosingPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
 
-    let clientProfit;
-    if (order.type === "BUY") {
-      clientProfit = closingGoldWeightValue - entryGoldWeightValue;
-    } else {
-      clientProfit = entryGoldWeightValue - closingGoldWeightValue;
+      if (order.type === "BUY") {
+        clientProfit = closingGoldWeightValue - entryGoldWeightValue;
+      } else {
+        clientProfit = entryGoldWeightValue - closingGoldWeightValue;
+      }
     }
 
     let newCashBalance = parseFloat(userAccount.reservedAmount);
@@ -542,6 +651,7 @@ export const updateTradeStatus = async (
     const currentMetalBalance = newMetalBalance;
     const currentAMOUNTFC = newAMOUNTFC;
 
+    // Update order with sanitized data
     Object.keys(sanitizedData).forEach((key) => {
       order[key] = sanitizedData[key];
     });
@@ -552,29 +662,42 @@ export const updateTradeStatus = async (
 
     await order.save({ session: mongoSession });
 
+    // Handle LP Position updates
     let lpProfit = 0;
     const lpPosition = await LPPosition.findOne({
       positionId: order.orderNo,
     }).session(mongoSession);
     
     if (lpPosition) {
-      if (sanitizedData.closingPrice) {
-        // Use actual MT5 closing price for LP position, fallback to current price
-        const lpClosingPrice = (mt5CloseResult?.closePrice || mt5CloseResult?.data?.price || currentPrice);
-        lpPosition.closingPrice = lpClosingPrice;
-        lpPosition.currentPrice = lpClosingPrice;
+      if (mt5ClosingPrice !== null) {
+        // Use actual MT5 closing price for LP position (no spread applied)
+        lpPosition.closingPrice = mt5ClosingPrice.toFixed(2);
+        lpPosition.currentPrice = mt5ClosingPrice.toFixed(2);
+      } else if (sanitizedData.closingPrice) {
+        // Fallback to provided closing price if MT5 closing wasn't performed
+        lpPosition.closingPrice = sanitizedData.closingPrice;
+        lpPosition.currentPrice = sanitizedData.closingPrice;
       }
+      
       if (sanitizedData.closingDate) {
         lpPosition.closeDate = sanitizedData.closingDate;
       }
+      
       if (sanitizedData.orderStatus === "CLOSED") {
         lpPosition.status = "CLOSED";
 
         const lpEntryPrice = parseFloat(lpPosition.entryPrice);
+        const lpClosingPrice = mt5ClosingPrice || parseFloat(sanitizedData.closingPrice);
+        
         const lpEntryGoldWeightValue =
           (lpEntryPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
         const lpClosingGoldWeightValue =
-          (currentPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
+          (lpClosingPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
+
+        const entryGoldWeightValue =
+          (entryPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
+        const closingGoldWeightValue =
+          (clientClosingPrice / TROY_OUNCE_GRAMS) * TTB_FACTOR * volume;
 
         const openingDifference = Math.abs(
           lpEntryGoldWeightValue - entryGoldWeightValue
@@ -585,8 +708,10 @@ export const updateTradeStatus = async (
         lpProfit = openingDifference + closingDifference;
 
         lpPosition.profit = lpProfit.toFixed(2);
+      } else if (mt5ClosingPrice !== null) {
+        lpPosition.currentPrice = mt5ClosingPrice.toFixed(2);
       } else if (sanitizedData.price) {
-        lpPosition.currentPrice = currentPrice;
+        lpPosition.currentPrice = sanitizedData.price;
       }
 
       await lpPosition.save({ session: mongoSession });
@@ -596,24 +721,27 @@ export const updateTradeStatus = async (
       console.warn(`LPPosition not found for positionId: ${order.orderNo}`);
     }
 
+    // Handle LP Profit updates
     if (sanitizedData.orderStatus === "CLOSED") {
       const lpProfitRecord = await LPProfit.findOne({
         orderNo: order.orderNo,
         status: "OPEN", // Only update the open LP profit record
       }).session(mongoSession);
+      
       if (lpProfitRecord) {
         const gramValue = TTB_FACTOR / TROY_OUNCE_GRAMS;
         let closingLPProfitValue;
 
+        // For closing positions, calculate LP profit based on the spread difference
         if (order.type === "BUY") {
-          closingLPProfitValue =
-            gramValue * volume * (userAccount.bidSpread || 0);
+          // When closing a BUY, LP gets bidSpread profit
+          closingLPProfitValue = gramValue * volume * (userAccount.bidSpread || 0);
         } else {
-          closingLPProfitValue =
-            gramValue * volume * (userAccount.askSpread || 0);
+          // When closing a SELL, LP gets askSpread profit
+          closingLPProfitValue = gramValue * volume * (userAccount.askSpread || 0);
         }
 
-        // Update existing LP Profit record
+        // Update existing LP Profit record with total profit (opening + closing)
         const totalLPProfit =
           parseFloat(lpProfitRecord.value) + closingLPProfitValue;
         lpProfitRecord.status = "CLOSED";
@@ -628,12 +756,11 @@ export const updateTradeStatus = async (
       }
     }
 
+    // Handle account balance updates and ledger entries for closed trades
     if (sanitizedData.orderStatus === "CLOSED") {
       const settlementAmount = order.requiredMargin
         ? parseFloat(order.requiredMargin)
-        : order.type === "BUY"
-        ? closingGoldWeightValue
-        : entryGoldWeightValue;
+        : 0;
 
       const userProfit = clientProfit > 0 ? clientProfit : 0;
 
@@ -657,6 +784,7 @@ export const updateTradeStatus = async (
         { session: mongoSession, new: true }
       );
 
+      // Create ledger entries with proper price information
       const orderLedgerEntry = new Ledger({
         entryId: generateEntryId("ORD"),
         entryType: "ORDER",
@@ -685,13 +813,14 @@ export const updateTradeStatus = async (
       await orderLedgerEntry.save({ session: mongoSession });
 
       if (lpPosition) {
+        const lpClosingPrice = mt5ClosingPrice || clientClosingPrice;
         const lpLedgerEntry = new Ledger({
           entryId: generateEntryId("LP"),
           entryType: "LP_POSITION",
           referenceNumber: order.orderNo,
           description: `LP Position closed for ${order.type} ${volume} ${
             order.symbol
-          } @ ${currentPrice.toFixed(2)}`,
+          } @ ${lpClosingPrice.toFixed(2)}`,
           amount: settlementAmount.toFixed(2),
           entryNature: "DEBIT",
           runningBalance: newCashBalance.toFixed(2),
@@ -701,7 +830,7 @@ export const updateTradeStatus = async (
             symbol: order.symbol,
             volume: volume,
             entryPrice: parseFloat(lpPosition.entryPrice),
-            closingPrice: currentPrice,
+            closingPrice: lpClosingPrice,
             profit: lpProfit.toFixed(2),
             status: "CLOSED",
           },
@@ -776,6 +905,11 @@ export const updateTradeStatus = async (
       profit: {
         client: clientProfit,
         lp: lpPosition ? parseFloat(lpPosition.profit) : 0,
+      },
+      closingPrices: {
+        mt5ClosingPrice: mt5ClosingPrice,
+        clientClosingPrice: clientClosingPrice,
+        spreadApplied: order.type === "BUY" ? userAccount.bidSpread : userAccount.askSpread,
       },
     };
   } catch (error) {

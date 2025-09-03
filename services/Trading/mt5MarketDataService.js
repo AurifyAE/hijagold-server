@@ -1,23 +1,20 @@
 import mt5Service from "./mt5Service.js";
-
+import dotenv from "dotenv";
+dotenv.config();
 class OptimizedMT5MarketDataService {
   constructor() {
-    this.accountKeys = Array.from(mt5Service.connections.keys());
-    this.symbolMappings = new Map();
-    for (const [key, conn] of mt5Service.connections.entries()) {
-      this.symbolMappings.set(key, { GOLD: conn.symbol });
-    }
-    this.priceUpdateIntervals = new Map();
-    this.isUpdating = new Map();
+    this.symbols = [process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix"];
+    this.symbolMapping = { GOLD: process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix" };
+    this.priceUpdateInterval = null;
+    this.isUpdating = false;
     this.activeSubscribers = new Set();
     this.lastActivity = Date.now();
-    this.connectionRetries = new Map();
 
     this.UPDATE_INTERVAL = 10000;
     this.INACTIVE_TIMEOUT = 300000;
+    this.BATCH_SIZE = 1;
     this.PRICE_CACHE_TTL = 15000;
     this.CONNECTION_RETRY_DELAY = 30000;
-    this.MAX_CONNECTION_RETRIES = 5;
 
     this.autoScaleMode = process.env.AWS_AUTO_SCALE === "true";
     this.region = process.env.AWS_REGION || "us-east-1";
@@ -28,82 +25,110 @@ class OptimizedMT5MarketDataService {
   }
 
   async initializeMT5() {
-    console.log(
-      `Initializing MT5 connections for ${this.accountKeys.length} accounts...`
-    );
-    for (const accKey of this.accountKeys) {
+    try {
+      console.log("Initializing MT5 connection...");
+      await mt5Service.connect();
+      console.log("MT5 connected successfully");
+
+      // Validate the symbol exists and get available symbols for debugging
       try {
-        await mt5Service.connect(accKey);
-        const conn = mt5Service.connections.get(accKey);
-        const sym = conn.symbol;
-        const validated = await mt5Service.validateSymbol(accKey, sym);
-        conn.symbol = validated; // Update the default symbol to the validated one to prevent mismatches
-        this.symbolMappings.get(accKey).GOLD = validated;
-        console.log(`Validated symbol for ${accKey}: ${validated}`);
-        this.startSmartPriceUpdates(accKey);
-      } catch (error) {
-        console.error(`MT5 initialization failed for ${accKey}:`, error);
-        const retries = (this.connectionRetries.get(accKey) || 0) + 1;
-        if (retries > this.MAX_CONNECTION_RETRIES) {
-          console.error(`Max retries reached for ${accKey}`);
-          continue;
-        }
-        const delay = Math.min(
-          this.CONNECTION_RETRY_DELAY * Math.pow(1.5, retries),
-          300000
+        const availableSymbols = await mt5Service.getSymbols();
+        console.log(
+          "Available symbols containing XAU:",
+          availableSymbols.filter((s) => s.includes("XAU"))
         );
-        this.connectionRetries.set(accKey, retries);
-        setTimeout(() => this.initializeMT5(), delay);
+
+        // Try to validate our symbol - now with proper URL encoding support
+        const validatedSymbol = await mt5Service.validateSymbol(
+          process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix"
+        );
+        console.log("Validated symbol:", validatedSymbol);
+
+        // Update our symbols array with the validated symbol
+        this.symbols = [validatedSymbol];
+        this.symbolMapping = { GOLD: validatedSymbol };
+      } catch (symbolError) {
+        console.warn("Symbol validation warning:", symbolError.message);
+        // Keep original symbols if validation fails - they should work now with URL encoding
       }
+
+      this.startSmartPriceUpdates();
+    } catch (error) {
+      console.error("MT5 initialization failed:", error);
+      const delay = Math.min(
+        this.CONNECTION_RETRY_DELAY *
+          Math.pow(1.5, this.connectionRetries || 0),
+        300000
+      );
+      this.connectionRetries = (this.connectionRetries || 0) + 1;
+      setTimeout(() => this.initializeMT5(), delay);
     }
   }
 
-  startSmartPriceUpdates(accKey) {
-    if (this.priceUpdateIntervals.get(accKey)) return;
+  startSmartPriceUpdates() {
+    if (this.priceUpdateInterval) return;
 
     console.log(
-      `Smart price updates started for ${accKey} (${this.UPDATE_INTERVAL}ms interval)`
+      `Smart price updates started (${this.UPDATE_INTERVAL}ms interval)`
     );
-    this.isUpdating.set(accKey, false);
 
-    const interval = setInterval(async () => {
-      if (this.isUpdating.get(accKey)) return;
+    this.priceUpdateInterval = setInterval(async () => {
+      if (this.isUpdating) return;
 
-      this.isUpdating.set(accKey, true);
+      this.isUpdating = true;
       try {
-        const symbol = this.symbolMappings.get(accKey).GOLD;
-        if (!mt5Service.isPriceFresh(accKey, symbol, this.PRICE_CACHE_TTL)) {
-          console.log(`Updating symbol ${symbol} for account ${accKey}`);
-          await mt5Service.getPrice(accKey, symbol);
-        } else {
-          console.log(`Price fresh for ${symbol} on ${accKey}, skipping`);
+        const symbolsToUpdate = this.symbols.filter((symbol) => {
+          const mapped = this.symbolMapping[symbol] || symbol;
+          return !mt5Service.isPriceFresh(mapped, this.PRICE_CACHE_TTL);
+        });
+
+        if (symbolsToUpdate.length === 0) {
+          console.log("All prices are fresh, skipping update");
+          return;
         }
+
+        console.log(`Updating ${symbolsToUpdate.length} symbols`);
+        await this.processMinimalUpdates(symbolsToUpdate);
       } catch (error) {
-        console.error(`Price update failed for ${accKey}:`, error);
+        console.error("Price update failed:", error);
+        // Don't increase interval too aggressively on errors now that URL encoding is fixed
         this.UPDATE_INTERVAL = Math.min(this.UPDATE_INTERVAL * 1.1, 30000);
       } finally {
-        this.isUpdating.set(accKey, false);
+        this.isUpdating = false;
       }
     }, this.UPDATE_INTERVAL);
-
-    this.priceUpdateIntervals.set(accKey, interval);
   }
 
-  async forcePriceUpdate(accKey, symbol) {
-    const mapped = this.symbolMappings.get(accKey).GOLD;
+  async forcePriceUpdate(symbol) {
+    const mapped = this.symbolMapping[symbol] || symbol;
     try {
-      console.log(`Forcing price update for symbol: ${mapped} on ${accKey}`);
-      const priceData = await mt5Service.getPrice(accKey, mapped);
+      console.log(`Forcing price update for symbol: ${mapped}`);
+      const priceData = await mt5Service.getPrice(mapped);
       console.log(
-        `Forced price update for ${mapped} on ${accKey}: bid=${priceData.bid}, ask=${priceData.ask}`
+        `Forced price update for ${mapped}: bid=${priceData.bid}, ask=${priceData.ask}`
       );
       return priceData;
     } catch (error) {
-      console.error(
-        `Forced price update failed for ${mapped} on ${accKey}:`,
-        error.message
-      );
+      console.error(`Forced price update failed for ${mapped}:`, error.message);
       throw error;
+    }
+  }
+
+  async processMinimalUpdates(symbols) {
+    for (const symbol of symbols) {
+      const mapped = this.symbolMapping[symbol] || symbol;
+      try {
+        console.log(`Processing price update for: ${mapped}`);
+        const priceData = await mt5Service.getPrice(mapped);
+        console.log(
+          `Price updated for ${mapped}: ${priceData.bid}/${priceData.ask} (spread: ${priceData.spread})`
+        );
+        // Small delay between requests to avoid overwhelming the API
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } catch (error) {
+        console.error(`Price update failed for ${mapped}:`, error.message);
+        // Continue with other symbols even if one fails
+      }
     }
   }
 
@@ -132,6 +157,7 @@ class OptimizedMT5MarketDataService {
 
     setInterval(() => {
       const inactiveTime = Date.now() - this.lastActivity;
+
       if (
         this.activeSubscribers.size === 0 &&
         inactiveTime > this.INACTIVE_TIMEOUT
@@ -145,77 +171,66 @@ class OptimizedMT5MarketDataService {
   scaleUp() {
     console.log("Scaling up: Increasing update frequency");
     this.UPDATE_INTERVAL = Math.max(this.UPDATE_INTERVAL * 0.8, 5000);
-    for (const accKey of this.accountKeys) {
-      this.restartPriceUpdates(accKey);
-    }
+    this.restartPriceUpdates();
   }
 
   prepareForScaleDown() {
     console.log("Preparing for scale-down: Reducing resource usage");
     this.UPDATE_INTERVAL = 30000;
-    for (const accKey of this.accountKeys) {
-      this.restartPriceUpdates(accKey);
-    }
+    this.restartPriceUpdates();
 
     if (process.env.AWS_ASG_NAME) {
       this.signalScaleDown();
     }
   }
 
+  restartPriceUpdates() {
+    if (this.priceUpdateInterval) {
+      clearInterval(this.priceUpdateInterval);
+      this.priceUpdateInterval = null;
+    }
+    this.startSmartPriceUpdates();
+  }
+
   async signalScaleDown() {
     try {
       console.log("Signaling AWS Auto Scaling for scale-down");
-      // Implement AWS scaling logic here
+      // AWS scaling logic would go here
     } catch (error) {
       console.error("Failed to signal scale-down:", error);
     }
   }
 
-  restartPriceUpdates(accKey) {
-    const interval = this.priceUpdateIntervals.get(accKey);
-    if (interval) {
-      clearInterval(interval);
-      this.priceUpdateIntervals.delete(accKey);
-    }
-    this.startSmartPriceUpdates(accKey);
-  }
-
-  async getMarketData(accKey, symbol = "GOLD", clientId = null) {
-    if (!this.accountKeys.includes(accKey)) {
-      throw new Error(`Unknown account ${accKey}`);
-    }
+  async getMarketData(
+    symbol = process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix",
+    clientId = null
+  ) {
     if (clientId) {
       this.addSubscriber(clientId);
     }
 
-    const mapped = this.symbolMappings.get(accKey)[symbol];
-    console.log(`Getting market data for symbol: ${mapped} on ${accKey}`);
+    const mapped = this.symbolMapping[symbol] || symbol;
+    console.log(`Getting market data for symbol: ${mapped}`);
 
-    let data = mt5Service.getCachedPrice(accKey, mapped);
+    let data = mt5Service.getCachedPrice(mapped);
 
-    if (
-      !data ||
-      !mt5Service.isPriceFresh(accKey, mapped, this.PRICE_CACHE_TTL)
-    ) {
+    if (!data || !mt5Service.isPriceFresh(mapped, this.PRICE_CACHE_TTL)) {
       try {
         console.log(
-          `Cache miss or stale data for ${mapped} on ${accKey}, fetching fresh data`
+          `Cache miss or stale data for ${mapped}, fetching fresh data`
         );
-        data = await this.forcePriceUpdate(accKey, mapped);
+        data = await this.forcePriceUpdate(mapped);
       } catch (error) {
-        console.error(
-          `Fresh data fetch failed for ${mapped} on ${accKey}:`,
-          error.message
-        );
+        console.error(`Fresh data fetch failed for ${mapped}:`, error.message);
         if (data) {
-          console.warn(`Using stale cached data for ${mapped} on ${accKey}`);
+          console.warn(`Using stale cached data for ${mapped}`);
         } else {
-          console.error(`No data available for ${mapped} on ${accKey}`);
+          console.error(`No data available for ${mapped}`);
           return null;
         }
       }
     } else {
-      console.log(`Using fresh cached data for ${mapped} on ${accKey}`);
+      console.log(`Using fresh cached data for ${mapped}`);
     }
 
     return data
@@ -225,19 +240,9 @@ class OptimizedMT5MarketDataService {
           ask: data.ask,
           spread: data.spread,
           timestamp: data.time,
-          high: data.high,
-          low: data.low,
-          marketStatus: data.marketStatus,
-          isFresh: mt5Service.isPriceFresh(
-            accKey,
-            mapped,
-            this.PRICE_CACHE_TTL
-          ),
+          isFresh: mt5Service.isPriceFresh(mapped, this.PRICE_CACHE_TTL),
           source:
-            data === mt5Service.getCachedPrice(accKey, mapped)
-              ? "cache"
-              : "fresh",
-          account: accKey,
+            data === mt5Service.getCachedPrice(mapped) ? "cache" : "fresh",
         }
       : null;
   }
@@ -248,44 +253,31 @@ class OptimizedMT5MarketDataService {
     }
 
     try {
-      console.log(
-        `Fetching positions for phone number: ${phoneNumber} across all accounts`
-      );
-      const allPositions = [];
-      for (const accKey of this.accountKeys) {
-        try {
-          const positions = await mt5Service.getPositions(accKey);
-          if (!positions || !Array.isArray(positions)) {
-            console.warn(
-              `No positions returned or invalid format for ${accKey}`
-            );
-            continue;
-          }
-
-          const filteredPositions = positions
-            .filter((p) => p.comment && p.comment.includes(phoneNumber))
-            .map((p) => ({
-              orderId: p.ticket,
-              type: p.type,
-              volume: p.volume,
-              openPrice: p.price_open,
-              currentPrice: p.price_current,
-              profit: p.profit,
-              symbol: p.symbol,
-              account: accKey,
-            }));
-
-          console.log(
-            `Found ${filteredPositions.length} positions for ${phoneNumber} on ${accKey}`
-          );
-          allPositions.push(...filteredPositions);
-        } catch (error) {
-          console.error(`Positions fetch failed for ${accKey}:`, error.message);
-        }
+      console.log(`Fetching positions for phone number: ${phoneNumber}`);
+      const positions = await mt5Service.getPositions();
+      if (!positions || !Array.isArray(positions)) {
+        console.warn("No positions returned or invalid format");
+        return [];
       }
-      return allPositions;
+
+      const filteredPositions = positions
+        .filter((p) => p.comment && p.comment.includes(phoneNumber))
+        .map((p) => ({
+          orderId: p.ticket,
+          type: p.type,
+          volume: p.volume,
+          openPrice: p.price_open,
+          currentPrice: p.price_current,
+          profit: p.profit,
+          symbol: p.symbol,
+        }));
+
+      console.log(
+        `Found ${filteredPositions.length} positions for ${phoneNumber}`
+      );
+      return filteredPositions;
     } catch (error) {
-      console.error("Positions fetch failed across accounts:", error.message);
+      console.error("Positions fetch failed:", error.message);
       return [];
     }
   }
@@ -302,49 +294,44 @@ class OptimizedMT5MarketDataService {
       },
       activeSubscribers: this.activeSubscribers.size,
       updateInterval: this.UPDATE_INTERVAL,
-      connectionRetries: Object.fromEntries(this.connectionRetries),
+      connectionRetries: this.connectionRetries || 0,
       lastActivity: new Date(this.lastActivity).toISOString(),
       autoScaleMode: this.autoScaleMode,
-      accountKeys: this.accountKeys,
-      symbolMappings: Object.fromEntries(this.symbolMappings),
+      currentSymbols: this.symbols,
+      symbolMapping: this.symbolMapping,
     };
   }
 
   getHealthStatus() {
-    const connectedAccounts = this.accountKeys.filter(
-      (key) => mt5Service.connections.get(key)?.isConnected
-    ).length;
     const isHealthy =
-      connectedAccounts > 0 && Date.now() - this.lastActivity < 600000;
+      mt5Service.isConnected && Date.now() - this.lastActivity < 600000;
 
     return {
       status: isHealthy ? "healthy" : "unhealthy",
-      connectedAccounts: connectedAccounts,
-      totalAccounts: this.accountKeys.length,
+      connected: mt5Service.isConnected,
       subscribers: this.activeSubscribers.size,
       lastActivity: this.lastActivity,
       uptime: process.uptime(),
-      symbolMappings: Object.fromEntries(this.symbolMappings),
+      symbols: this.symbols,
+      symbolMapping: this.symbolMapping,
     };
   }
 
   async shutdown() {
     console.log("Initiating graceful shutdown...");
 
-    for (const [accKey, interval] of this.priceUpdateIntervals.entries()) {
-      clearInterval(interval);
-      this.priceUpdateIntervals.delete(accKey);
+    if (this.priceUpdateInterval) {
+      clearInterval(this.priceUpdateInterval);
+      this.priceUpdateInterval = null;
     }
 
     this.activeSubscribers.clear();
 
-    for (const accKey of this.accountKeys) {
-      try {
-        await mt5Service.disconnect(accKey);
-        console.log(`Disconnected ${accKey}`);
-      } catch (error) {
-        console.error(`Error during disconnect for ${accKey}:`, error);
-      }
+    try {
+      await mt5Service.disconnect();
+      console.log("MT5 disconnected");
+    } catch (error) {
+      console.error("Error during MT5 disconnect:", error);
     }
 
     console.log("Market data service shut down gracefully");
@@ -353,6 +340,7 @@ class OptimizedMT5MarketDataService {
 
 const optimizedMT5MarketDataService = new OptimizedMT5MarketDataService();
 
+// Graceful shutdown handlers
 process.on("SIGTERM", async () => {
   console.log("Received SIGTERM, shutting down gracefully");
   await optimizedMT5MarketDataService.shutdown();
