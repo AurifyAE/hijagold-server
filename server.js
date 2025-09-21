@@ -21,7 +21,7 @@ const port = process.env.PORT || 4444;
 // Initialize Socket.IO with CORS
 const io = new Server(server, {
   cors: {
-    origin: ["https://hijamarketscrm.aurify.ae", "http://localhost:5173"],
+    origin: ["http://localhost:5173"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "x-secret-key", "Authorization"],
     credentials: true,

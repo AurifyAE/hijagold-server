@@ -9,6 +9,12 @@ import LPProfit from "../../models/LPProfit.js";
 const TROY_OUNCE_GRAMS = 31.103;
 const TTB_FACTOR = 116.64;
 
+
+const SYMBOL_ALIASES = {
+  XAUUSD: 'GOLD',
+  // Add other aliases if needed, e.g., 'GOLDUSD': 'GOLD'
+};
+
 // Symbol mapping for CRM to MT5
 const SYMBOL_MAPPING = {
   GOLD: process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix",
@@ -33,13 +39,19 @@ const validateOrderData = (tradeData, userId, adminId) => {
   if (isNaN(tradeData.volume) || tradeData.volume < 0.01) {
     errors.push("Invalid volume: must be a number >= 0.01");
   }
-  if (!tradeData.symbol || !SYMBOL_MAPPING[tradeData.symbol]) {
+
+  // Map symbol to CRM symbol if it's an alias
+  const crmSymbol = SYMBOL_ALIASES[tradeData.symbol] || tradeData.symbol;
+  if (!crmSymbol || !SYMBOL_MAPPING[crmSymbol]) {
     errors.push(
       `Invalid symbol: ${tradeData.symbol}. Supported: ${Object.keys(
         SYMBOL_MAPPING
       ).join(", ")}`
     );
   }
+  // Update tradeData.symbol to CRM symbol
+  tradeData.symbol = crmSymbol;
+
   const price = tradeData.openingPrice ?? tradeData.price;
   if (isNaN(price) || price <= 0) {
     errors.push("Invalid price or openingPrice: must be a positive number");

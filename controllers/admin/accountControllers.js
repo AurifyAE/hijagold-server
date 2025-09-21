@@ -6,7 +6,7 @@ import Admin from "../../models/AdminSchema.js";
 export const getAllData = async (req, res, next) => {
   try {
     const { adminId } = req.params;
-
+  console.log("Admin ID:", adminId); // Debugging line
     const accounts = await accountServices.findAllAccounts(adminId);
     res.json({
       status: 200,

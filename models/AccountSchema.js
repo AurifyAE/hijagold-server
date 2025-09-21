@@ -30,10 +30,10 @@ const AccountSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
-    // Account_Type: {
-    //   type: String,
-    //   required: true,
-    // },
+    symbol: {
+      type: String,
+      required: true,
+    },
     isFreeze: {
       type: Boolean,
       default: false,

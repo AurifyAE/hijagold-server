@@ -25,7 +25,8 @@ if (!twilioPhoneNumber.startsWith("whatsapp:")) {
 
 // Symbol mapping for CRM to MT5
 const SYMBOL_MAPPING = {
-  GOLD: process.env.MT5_SYMBOL || "XAUUSD_TTBAR.Fix",
+  TTBAR: process.env.MT5_SYMBOL || "XAUUSD.gm",
+  KGBAR: process.env.MT5_SYMBOL || "XAUUSD.gm",
 };
 
 // Validate trade data
